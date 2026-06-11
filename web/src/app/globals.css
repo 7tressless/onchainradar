@@ -1,0 +1,177 @@
+@import "tailwindcss";
+
+/*
+  OCR "On-Chain Blueprint" theme.
+  Swiss/brutalist editorial: warm concrete-grey canvas, blueprint grid, paper grain,
+  huge Archivo display + Space Mono technical text. Monochrome plus a single accent
+  (vermilion), reserved for live / anomalous signals. Light, not the generic dark.
+*/
+@theme {
+  --color-bg: #e7e4dd; /* warm concrete */
+  --color-surface: #dcd8ce;
+  --color-ink: #16150f; /* warm near-black */
+  --color-muted: #5f5d54; /* ~4.9:1 on bg, AA for normal text */
+  --color-faint: #6f6a5c; /* ~4.2:1 on bg, small labels stay legible */
+  --color-line: #c6c2b7; /* blueprint grid lines */
+  --color-accent: #e8412a; /* vermilion, live / anomaly only */
+
+  /* Per-type / per-grade colours. Cool = flow, green = smart, warm/red = stress. */
+  --type-flow: #7d869c; /* slate  */
+  --type-whale: #b08838; /* ochre  */
+  --type-smart: #4f8a6b; /* sage   */
+  --type-lst: #4a6f93; /* blue   */
+  --type-liq: #bf5a3a; /* terracotta */
+  --type-borrow: #9a6a4e; /* brick  */
+  /* depeg uses --color-accent */
+  --grade-a: #4f8a6b;
+  --grade-b: #4a6f93;
+  --grade-c: #b08838;
+  --grade-d: #c0703f;
+  /* grade F uses --color-accent */
+  --color-up: #4f8a6b; /* price/flow up = sage; down = accent */
+
+  --font-display: var(--font-archivo), "Arial Narrow", Arial, system-ui, sans-serif;
+  --font-mono: var(--font-space-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius-base: 0px;
+}
+
+:root {
+  color-scheme: light;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  font-size: 13px;
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  cursor: none;
+}
+.mono {
+  font-family: var(--font-mono);
+}
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+a {
+  color: inherit;
+  text-decoration: none;
+}
+::selection {
+  background: var(--color-accent);
+  color: #fff;
+}
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* blueprint grid (the cells) + concrete grain, fixed behind content */
+.bp-grid {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    repeating-linear-gradient(0deg, transparent 0 63px, var(--color-line) 63px 64px),
+    repeating-linear-gradient(90deg, transparent 0 63px, var(--color-line) 63px 64px);
+  opacity: 0.28; /* calmer; lets content win over the grid */
+}
+.bp-grain {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.06;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* blend-mode custom cursor (pure CSS) */
+.blend-cursor {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  mix-blend-mode: difference;
+  pointer-events: none;
+  z-index: 9999;
+  will-change: transform;
+  transition: width 0.18s ease, height 0.18s ease;
+}
+.blend-cursor[data-big="1"] {
+  width: 58px;
+  height: 58px;
+}
+
+@keyframes ocr-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+@keyframes ocr-flare {
+  0% {
+    background: color-mix(in srgb, var(--color-accent) 24%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+.ocr-flare {
+  animation: ocr-flare 1.6s ease-out 1;
+}
+
+/* thin scrollbar for internal scroll areas */
+.ocr-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.ocr-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+}
+.ocr-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* the pulsing live dots use inline style, so stop them too */
+@media (prefers-reduced-motion: reduce) {
+  [style*="ocr-pulse"] {
+    animation: none !important;
+  }
+}
+
+@media (pointer: coarse) {
+  body {
+    cursor: auto;
+  }
+  .blend-cursor {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  body {
+    cursor: auto;
+  }
+  .blend-cursor {
+    display: none;
+  }
+  .ocr-flare {
+    animation: none;
+  }
+}

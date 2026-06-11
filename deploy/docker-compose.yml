@@ -1,0 +1,64 @@
+# OCR deployment: Postgres + one-shot migration + the agent (ocr run).
+# Bring up: cd deploy && docker compose up -d --build
+#
+# Secrets come from ../.env (gitignored). DATABASE_URL and DASHBOARD_ADDR are
+# overridden here for the container network.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ocr
+      POSTGRES_PASSWORD: ${PGPASSWORD:-ocr}
+      POSTGRES_DB: ocr
+    volumes:
+      - ocr-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ocr -d ocr"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # One-shot: apply every migration in lexical order, then exit. ocr waits for
+  # this to complete. All migrations are idempotent (IF [NOT] EXISTS), so a
+  # re-run against an existing DB is safe. Add new files as migrations/NNNN_*.sql
+  # and they are picked up automatically by the glob below.
+  migrate:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${PGPASSWORD:-ocr}
+    volumes:
+      - ../migrations:/migrations:ro
+    entrypoint:
+      - sh
+      - -c
+      - 'set -e; for f in $$(ls /migrations/*.sql | sort); do echo "applying $$f"; psql -h postgres -U ocr -d ocr -v ON_ERROR_STOP=1 -f "$$f"; done'
+    restart: "no"
+
+  ocr:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - ../.env
+    environment:
+      # Point at the compose Postgres service (overrides .env's local DSN).
+      DATABASE_URL: postgres://ocr:${PGPASSWORD:-ocr}@postgres:5432/ocr?sslmode=disable
+      # Bind 0.0.0.0 inside the container so the host port mapping can route.
+      DASHBOARD_ADDR: 0.0.0.0:7070
+    ports:
+      # Private: host loopback only; reach it via an SSH tunnel.
+      # Public: change to "7070:7070" and open the firewall.
+      - "127.0.0.1:7070:7070"
+    command: ["run"]
+    restart: unless-stopped
+
+volumes:
+  ocr-pgdata: {}

@@ -1,0 +1,16 @@
+# secrets
+.env
+.env.*
+!.env.example
+# build context: git, binaries, deps
+.git/
+.gitignore
+*.exe
+*.exe~
+ocr
+/out/
+contracts/cache/
+contracts/broadcast/
+contracts/lib/
+contracts/out/
+node_modules/

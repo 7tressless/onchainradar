@@ -1,0 +1,137 @@
+# OCR curated Mantle pool registry.
+#
+# Every address, token, decimals, and ABI is verified against official docs plus
+# MantleScan; never invent addresses, and each entry carries a `source_url`.
+# Anchors: WMNT, mETH, USDT, USDe.
+#
+# Entry shape:
+#   - address: "0x..."        # lowercase hex, the pool contract
+#     dex: "merchant_moe"     # merchant_moe | agni | fusionx | ...
+#     token0: "0x..."
+#     token1: "0x..."
+#     dec0: 18
+#     dec1: 6
+#     label: "WMNT/USDT"
+#     enabled: true
+#     source_url: "https://..."   # where the address was confirmed
+#
+# token0/token1 below reflect the actual on-chain ordering, verified via
+# Mantle RPC (https://rpc.mantle.xyz) eth_call:
+#   - Agni (Uniswap-V3 fork): token0()/token1() (selectors 0x0dfe1681 / 0xd21220a7).
+#   - Merchant Moe (Liquidity Book v2.1 clone-with-immutable-args): tokenX/tokenY
+#     parsed from the EIP-1167 clone bytecode immutable args (eth_getCode).
+# Token decimals confirmed via GeckoTerminal token API:
+#   WMNT 0x78c1b0c915c4faa5fffa6cabf0219da63d7f4cb8 = 18
+#   USDe 0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34 = 18
+#   USDC 0x09bc4e0d864854c6afb6eb9a9cdf58ac190d0df9 = 6
+#   USDT 0x201eba5cc46d216ce6dc03f6a759e8e766e956ae = 6
+# Note: mETH (0xcda86a272531e8640cd7f1a92c01839911b90bb0) has no currently-active
+# anchor-paired pool on these DEXes (only thin mETH/WETH and PUFF/mETH dust pools
+# observed, < $4k reserve), so it is omitted rather than shipping a dead pool.
+pools:
+  - address: "0xeafc4d6d4c3391cd4fc10c85d2f5f972d58c0dd5"
+    dex: "agni"
+    token0: "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34"
+    token1: "0x78c1b0c915c4faa5fffa6cabf0219da63d7f4cb8"
+    dec0: 18
+    dec1: 18
+    label: "USDe/WMNT"
+    enabled: true
+    source_url: "https://mantlescan.xyz/address/0xeafc4d6d4c3391cd4fc10c85d2f5f972d58c0dd5"
+
+  - address: "0x5d54d430d1fd9425976147318e6080479bffc16d"
+    dex: "merchant_moe"
+    token0: "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34"
+    token1: "0x78c1b0c915c4faa5fffa6cabf0219da63d7f4cb8"
+    dec0: 18
+    dec1: 18
+    label: "USDe/WMNT"
+    enabled: true
+    source_url: "https://mantlescan.xyz/address/0x5d54d430d1fd9425976147318e6080479bffc16d"
+
+  - address: "0x7e78b65d0525339df5f4aa22b82d9e97584da8fc"
+    dex: "merchant_moe"
+    token0: "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34"
+    token1: "0x09bc4e0d864854c6afb6eb9a9cdf58ac190d0df9"
+    dec0: 18
+    dec1: 6
+    label: "USDe/USDC"
+    enabled: true
+    source_url: "https://mantlescan.xyz/address/0x7e78b65d0525339df5f4aa22b82d9e97584da8fc"
+
+  - address: "0xbcf99c834e65e8a58090e20edc058279317865bd"
+    dex: "agni"
+    token0: "0x09bc4e0d864854c6afb6eb9a9cdf58ac190d0df9"
+    token1: "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34"
+    dec0: 6
+    dec1: 18
+    label: "USDC/USDe"
+    enabled: true
+    source_url: "https://mantlescan.xyz/address/0xbcf99c834e65e8a58090e20edc058279317865bd"
+    # Per-pool override: this pool's flow z-scores are heavy-tailed (median z ~31
+    # on real signals), so the global default (4) fires constantly here. Gate at
+    # 12 to surface only the genuinely extreme moves. Other pools (median z ~5-7)
+    # keep the global default.
+    z_threshold: 12
+
+  - address: "0x36a7aff497eef6a9cd7d0e7bc243793fcb3e57e2"
+    dex: "agni"
+    token0: "0x201eba5cc46d216ce6dc03f6a759e8e766e956ae"
+    token1: "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34"
+    dec0: 6
+    dec1: 18
+    label: "USDT/USDe"
+    enabled: true
+    source_url: "https://mantlescan.xyz/address/0x36a7aff497eef6a9cd7d0e7bc243793fcb3e57e2"
+
+  - address: "0x365722f12ceb2063286a268b03c654df81b7c00f"
+    dex: "merchant_moe"
+    token0: "0x78c1b0c915c4faa5fffa6cabf0219da63d7f4cb8"
+    token1: "0x201eba5cc46d216ce6dc03f6a759e8e766e956ae"
+    dec0: 18
+    dec1: 6
+    label: "WMNT/USDT"
+    enabled: true
+    source_url: "https://mantlescan.xyz/address/0x365722f12ceb2063286a268b03c654df81b7c00f"
+
+# Per-pool source_url and confidence.
+# All 6 pools are anchor/anchor pairs (tokens in {WMNT, USDe, USDT, USDC}) with
+# live reserves observed 2026-06-06 via GeckoTerminal, and token0/token1 ordering
+# + token addresses re-verified on-chain via Mantle RPC. Confidence = high for all.
+#
+# 1. 0xeafc4d6d4c3391cd4fc10c85d2f5f972d58c0dd5  Agni USDe/WMNT 0.25%  reserve ~$3.21M  confidence: high
+#      https://mantlescan.xyz/address/0xeafc4d6d4c3391cd4fc10c85d2f5f972d58c0dd5
+#      cross-ref: https://www.geckoterminal.com/mantle/pools/0xeafc4d6d4c3391cd4fc10c85d2f5f972d58c0dd5
+#      on-chain token0=USDe token1=WMNT (token0()/token1() via rpc.mantle.xyz)
+# 2. 0x5d54d430d1fd9425976147318e6080479bffc16d  Merchant Moe LB USDe/WMNT  reserve ~$3.19M  confidence: high
+#      https://mantlescan.xyz/address/0x5d54d430d1fd9425976147318e6080479bffc16d
+#      cross-ref: https://www.geckoterminal.com/mantle/pools/0x5d54d430d1fd9425976147318e6080479bffc16d
+#      on-chain tokenX=USDe tokenY=WMNT (LB clone immutable args via eth_getCode)
+# 3. 0x7e78b65d0525339df5f4aa22b82d9e97584da8fc  Merchant Moe LB USDe/USDC  reserve ~$2.14M  confidence: high
+#      https://mantlescan.xyz/address/0x7e78b65d0525339df5f4aa22b82d9e97584da8fc
+#      cross-ref: https://www.geckoterminal.com/mantle/pools/0x7e78b65d0525339df5f4aa22b82d9e97584da8fc
+#      on-chain tokenX=USDe tokenY=USDC (LB clone immutable args via eth_getCode)
+# 4. 0xbcf99c834e65e8a58090e20edc058279317865bd  Agni USDC/USDe 0.01%  reserve ~$1.70M  confidence: high
+#      https://mantlescan.xyz/address/0xbcf99c834e65e8a58090e20edc058279317865bd
+#      cross-ref: https://www.geckoterminal.com/mantle/pools/0xbcf99c834e65e8a58090e20edc058279317865bd
+#      on-chain token0=USDC token1=USDe (token0()/token1() via rpc.mantle.xyz)
+# 5. 0x36a7aff497eef6a9cd7d0e7bc243793fcb3e57e2  Agni USDe/USDT 0.01%  reserve ~$1.53M  confidence: high
+#      https://mantlescan.xyz/address/0x36a7aff497eef6a9cd7d0e7bc243793fcb3e57e2
+#      cross-ref: https://www.geckoterminal.com/mantle/pools/0x36a7aff497eef6a9cd7d0e7bc243793fcb3e57e2
+#      on-chain token0=USDT token1=USDe (token0()/token1() via rpc.mantle.xyz)
+# 6. 0x365722f12ceb2063286a268b03c654df81b7c00f  Merchant Moe LB WMNT/USDT  reserve ~$1.06M  confidence: high
+#      https://mantlescan.xyz/address/0x365722f12ceb2063286a268b03c654df81b7c00f
+#      cross-ref: https://www.geckoterminal.com/mantle/pools/0x365722f12ceb2063286a268b03c654df81b7c00f
+#      on-chain tokenX=WMNT tokenY=USDT (LB clone immutable args via eth_getCode)
+#
+# Token address sources (MantleScan / Mantle explorer):
+#   WMNT https://explorer.mantle.xyz/token/0x78c1b0C915c4FAA5FffA6CAbf0219DA63d7f4cb8
+#   USDT https://mantlescan.xyz/address/0x201EBa5CC46D216Ce6DC03F6a759e8E766e956aE
+#   USDC https://mantlescan.xyz/address/0x09Bc4E0D864854c6aFB6eB9A9cdF58aC190D0dF9
+#   USDe https://explorer.mantle.xyz/token/0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34
+#   mETH https://mantlescan.xyz/token/0xcda86a272531e8640cd7f1a92c01839911b90bb0 (no active anchor pool; omitted)
+#
+# FusionX: no currently-active anchor/anchor pool found (best observed was
+# fusionx-v3 WETH/USDT 0x262255f4770aebe2d0c8b97a46287dcecc2a0aff at ~$9k and
+# 0xa125af1a4704044501fe12ca9567ef1550e430e8 at ~$12k; both thin and WETH is
+# not an anchor). Intentionally not included. Re-verify if FusionX revives.

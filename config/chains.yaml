@@ -1,0 +1,18 @@
+# OCR chain endpoints. Verified 2026-06-06: mainnet chainId 0x1388=5000,
+# sepolia chainId 0x138b=5003, both RPCs respond without auth.
+chains:
+  mantle:
+    name: mantle
+    chain_id: 5000
+    http_url: https://rpc.mantle.xyz
+    poll_interval_sec: 3
+    confirmations: 2
+  mantle_sepolia:
+    name: mantle_sepolia
+    chain_id: 5003
+    http_url: https://rpc.sepolia.mantle.xyz
+    poll_interval_sec: 3
+    confirmations: 2
+
+# Standard Multicall3, same address on Mantle.
+multicall3: "0xca11bde05977b3631167028862be2a173976ca11"

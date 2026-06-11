@@ -1,0 +1,30 @@
+# secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.pfx
+id_rsa
+id_ed25519
+*_rsa
+*credentials*
+keystore.json
+
+# build artifacts
+*.exe
+*.exe~
+*~
+/ocr
+/out/
+
+# foundry
+/contracts/out/
+/contracts/cache/
+/contracts/broadcast/
+/contracts/lib/
+
+# node / next
+node_modules/
+.next/
+.DS_Store
