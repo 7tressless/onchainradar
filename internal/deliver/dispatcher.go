@@ -123,7 +123,7 @@ func formatFlow(s store.Signal, dc Context, attestTx, base, dashboardURL string)
 	specs = append(specs, venueSpec(dc, s.Pool))
 
 	return MessageView{
-		Caption:  caption("📊", flowTitle(s.Metric), subjectDex(dc, s.Pool), body.String(), s.LLMNote, "Pool", s.Pool),
+		Caption:  caption("📊", flowTitle(s.Metric), pairSubject(dc.PoolLabel, s.Pool), dexVenue(dc), body.String(), s.LLMNote, "Pool", s.Pool, signalUnix(s)),
 		Keyboard: signalButtons("View pool", s.Pool, "", attestTx, base, dashboardURL),
 		Card:     cardData(s, "flow", flowTypeLabel(s.Metric), pairHeadline(dc.PoolLabel, s.Pool), sub, specs, attestTx),
 	}
@@ -178,7 +178,7 @@ func formatWhale(s store.Signal, dc Context, attestTx, base, dashboardURL string
 		copyLabel, copyAddr = "Pool", s.Pool
 	}
 	return MessageView{
-		Caption:  caption("🐋", "Whale swap", subjectDex(dc, s.Pool), body.String(), s.LLMNote, copyLabel, copyAddr),
+		Caption:  caption("🐋", "Whale swap", pairSubject(dc.PoolLabel, s.Pool), dexVenue(dc), body.String(), s.LLMNote, copyLabel, copyAddr, signalUnix(s)),
 		Keyboard: signalButtons("View pool", s.Pool, actor, attestTx, base, dashboardURL),
 		Card:     cardData(s, "whale", "WHALE SWAP", pairHeadline(dc.PoolLabel, s.Pool), sub, specs, attestTx),
 	}
@@ -232,7 +232,7 @@ func formatSmartMoney(s store.Signal, dc Context, attestTx, base, dashboardURL s
 	}
 
 	return MessageView{
-		Caption:  caption("🧠", "Smart money", subjectDex(dc, s.Pool), body.String(), s.LLMNote, "Wallet", actor),
+		Caption:  caption("🧠", "Smart money", pairSubject(dc.PoolLabel, s.Pool), dexVenue(dc), body.String(), s.LLMNote, "Wallet", actor, signalUnix(s)),
 		Keyboard: signalButtons("View pool", s.Pool, actor, attestTx, base, dashboardURL),
 		Card:     cardData(s, "smart", "SMART MONEY", pairHeadline(dc.PoolLabel, s.Pool), sub, specs, attestTx),
 	}
@@ -292,7 +292,7 @@ func formatLSTFlow(s store.Signal, attestTx, base, dashboardURL string) MessageV
 		copyLabel, copyAddr = "Token", s.Pool
 	}
 	return MessageView{
-		Caption:  caption(emoji, EscapeHTML(sym)+" "+verb, "Mantle", body.String(), s.LLMNote, copyLabel, copyAddr),
+		Caption:  caption(emoji, EscapeHTML(sym)+" "+verb, "Mantle", "", body.String(), s.LLMNote, copyLabel, copyAddr, signalUnix(s)),
 		Keyboard: signalButtons("View token", s.Pool, actor, attestTx, base, dashboardURL),
 		Card:     cardData(s, "lst", "LST FLOW", sym, sub, specs, attestTx),
 	}
@@ -354,7 +354,7 @@ func formatLending(s store.Signal, attestTx, base, dashboardURL string) MessageV
 		copyLabel, copyAddr = "Reserve", s.Pool
 	}
 	return MessageView{
-		Caption:  caption(emoji, title, "Aave V3", body.String(), s.LLMNote, copyLabel, copyAddr),
+		Caption:  caption(emoji, title, "Aave V3", "", body.String(), s.LLMNote, copyLabel, copyAddr, signalUnix(s)),
 		Keyboard: signalButtons(subjectLabel, s.Pool, actor, attestTx, base, dashboardURL),
 		Card:     cardData(s, kind, typeLabel, "AAVE V3", sub, specs, attestTx),
 	}
@@ -411,24 +411,52 @@ func formatDepeg(s store.Signal, attestTx, base, dashboardURL string) MessageVie
 	}
 
 	return MessageView{
-		Caption:  caption("⚠️", "Depeg alert", EscapeHTML(sym), body.String(), s.LLMNote, "Token", s.Pool),
+		Caption:  caption("⚠️", "Depeg alert", EscapeHTML(sym), "", body.String(), s.LLMNote, "Token", s.Pool, signalUnix(s)),
 		Keyboard: signalButtons("View token", s.Pool, "", attestTx, base, dashboardURL),
 		Card:     cardData(s, "depeg", "DEPEG ALERT", sym, sub, specs, attestTx),
 	}
 }
 
-// caption assembles the post caption in the channel's fixed shape: a bold title line
-// (the push-notification preview), a blank line, the plain-language body, the analyst
-// note as an expandable blockquote, and one tap-to-copy artifact in a code block.
-// title and subject arrive escaped; body arrives as ready HTML.
-func caption(emoji, typ, subject, body, note, copyLabel, copyAddr string) string {
+// caption assembles the post caption: a bold title (emoji · type · subject, with an
+// italic venue when present) that doubles as the push-notification preview, the
+// plain-language body, the analyst note as an expandable blockquote, one tap-to-copy
+// artifact, and a native tg-time footer. typ/subject/venue arrive escaped; body arrives
+// as ready HTML. ts is the signal's Unix time, or 0 to omit the footer.
+func caption(emoji, typ, subject, venue, body, note, copyLabel, copyAddr string, ts int64) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s <b>%s · %s</b>\n\n%s", emoji, typ, subject, body)
+	fmt.Fprintf(&b, "%s <b>%s</b> · <b>%s</b>", emoji, typ, subject)
+	if v := strings.TrimSpace(venue); v != "" {
+		fmt.Fprintf(&b, " · <i>%s</i>", v)
+	}
+	fmt.Fprintf(&b, "\n\n%s", body)
 	b.WriteString(noteBlock(note))
+
+	var footer string
 	if a := strings.TrimSpace(copyAddr); a != "" {
-		fmt.Fprintf(&b, "\n\n<b>%s</b>\n<code>%s</code>", copyLabel, EscapeHTML(a))
+		footer = fmt.Sprintf("%s  <code>%s</code>", copyLabel, EscapeHTML(a))
+	}
+	if ts > 0 {
+		if footer != "" {
+			footer += "\n"
+		}
+		footer += timeFooter(ts)
+	}
+	if footer != "" {
+		fmt.Fprintf(&b, "\n\n%s", footer)
 	}
 	return b.String()
+}
+
+// timeFooter renders the footer timestamp as native tg-time entities — each client shows
+// them in its own locale and keeps the relative age live: "{age} · {date}, {clock}". The
+// inner text is the fallback for clients that predate the entity.
+func timeFooter(ts int64) string {
+	t := time.Unix(ts, 0).UTC()
+	clock := t.Format("15:04")
+	return fmt.Sprintf(
+		`<tg-time unix=%d format="r">%s</tg-time> · <tg-time unix=%d format="D">%s</tg-time>, <tg-time unix=%d format="t">%s</tg-time>`,
+		ts, clock+" UTC", ts, t.Format("January 2, 2006"), ts, clock,
+	)
 }
 
 // cardData wraps the per-family card fields with the parts every family derives the same
@@ -544,23 +572,25 @@ func humanMultiple(latest, median float64) (string, bool) {
 	return fmt.Sprintf("%.0f×", m), true
 }
 
-// subjectDex renders the caption subject for a DEX-pool signal: the pair label (or
-// short address) with the DEX name appended, e.g. "USDe/WMNT · Agni".
-func subjectDex(dc Context, pool string) string {
-	subj := subjectName(dc.PoolLabel, pool)
-	if d := strings.TrimSpace(dc.Dex); d != "" {
-		return subj + " · " + EscapeHTML(d)
-	}
-	return subj
+// pairSubject is the bold caption subject for a DEX-pool signal: the spaced, escaped
+// pair (or the short pool address when unlabeled).
+func pairSubject(label, pool string) string {
+	return EscapeHTML(pairHeadline(label, pool))
 }
 
-// subjectName prefers a human pool label, falling back to the short pool address when
-// no label is known. The result is HTML-escaped for use in the caption.
-func subjectName(label, pool string) string {
-	if l := strings.TrimSpace(label); l != "" {
-		return EscapeHTML(l)
+// dexVenue is the italic caption venue for a DEX-pool signal (escaped), or "" when the
+// DEX is unknown.
+func dexVenue(dc Context) string {
+	return EscapeHTML(strings.TrimSpace(dc.Dex))
+}
+
+// signalUnix is the signal's creation time as a Unix timestamp for the tg-time footer,
+// or 0 to omit the footer when the time is unset.
+func signalUnix(s store.Signal) int64 {
+	if s.CreatedAt.IsZero() {
+		return 0
 	}
-	return shortAddr(pool)
+	return s.CreatedAt.Unix()
 }
 
 // noteBlock renders the analyst note as an expandable blockquote (collapsed in the

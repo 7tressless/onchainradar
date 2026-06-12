@@ -2,6 +2,8 @@ package deliver
 
 import (
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -80,10 +82,11 @@ func TestFormatSignal_Flow(t *testing.T) {
 	v := FormatSignal(s, Context{PoolLabel: "USDC/USDe", Dex: "Agni"}, "0xtxhash", testScanBase, testDash)
 
 	for _, want := range []string{
-		"📊 <b>Volume spike · USDC/USDe · Agni</b>",
+		"📊 <b>Volume spike</b> · <b>USDC / USDe</b> · <i>Agni</i>",
 		"<b>9.1×</b> this pool's own 48-hour average",
 		"<blockquote expandable><b>Analyst take</b>\nVolume spiked.</blockquote>",
-		"<b>Pool</b>\n<code>" + s.Pool + "</code>",
+		"Pool  <code>" + s.Pool + "</code>",
+		"<tg-time unix=",
 	} {
 		if !strings.Contains(v.Caption, want) {
 			t.Errorf("flow caption missing %q:\n%s", want, v.Caption)
@@ -144,9 +147,9 @@ func TestFormatSignal_Whale(t *testing.T) {
 	v := FormatSignal(s, Context{PoolLabel: "USDe/WMNT", Dex: "Agni"}, "", testScanBase, testDash)
 
 	for _, want := range []string{
-		"🐋 <b>Whale swap · USDe/WMNT · Agni</b>",
+		"🐋 <b>Whale swap</b> · <b>USDe / WMNT</b> · <i>Agni</i>",
 		"<b>$48,200</b> swap, <b>18×</b> the pool's usual trade size.",
-		"<b>Wallet</b>\n<code>" + s.Actor + "</code>",
+		"Wallet  <code>" + s.Actor + "</code>",
 	} {
 		if !strings.Contains(v.Caption, want) {
 			t.Errorf("whale caption missing %q:\n%s", want, v.Caption)
@@ -195,10 +198,10 @@ func TestFormatSignal_SmartMoney(t *testing.T) {
 	v := FormatSignal(s, Context{PoolLabel: "USDC/USDe"}, "0xtx3", testScanBase, testDash)
 
 	for _, want := range []string{
-		"🧠 <b>Smart money · USDC/USDe</b>",
+		"🧠 <b>Smart money</b> · <b>USDC / USDe</b>",
 		"<b>6 large buys</b> across <b>3 pool(s)</b>",
 		"Score <b>78/100</b>",
-		"<b>Wallet</b>\n<code>" + s.Actor + "</code>",
+		"Wallet  <code>" + s.Actor + "</code>",
 	} {
 		if !strings.Contains(v.Caption, want) {
 			t.Errorf("smart-money caption missing %q:\n%s", want, v.Caption)
@@ -250,9 +253,9 @@ func TestFormatSignal_Liquidation(t *testing.T) {
 	v := FormatSignal(s, Context{}, "0xtx", testScanBase, testDash)
 
 	for _, want := range []string{
-		"⚡ <b>Liquidation · Aave V3</b>",
+		"⚡ <b>Liquidation</b> · <b>Aave V3</b>",
 		"<b>$50,000</b> position liquidated",
-		"<b>Liquidator</b>\n<code>" + s.Actor + "</code>",
+		"Liquidator  <code>" + s.Actor + "</code>",
 	} {
 		if !strings.Contains(v.Caption, want) {
 			t.Errorf("liquidation caption missing %q:\n%s", want, v.Caption)
@@ -291,7 +294,7 @@ func TestFormatSignal_BigBorrow(t *testing.T) {
 	}
 	v := FormatSignal(s, Context{}, "", testScanBase, testDash)
 
-	for _, want := range []string{"💵 <b>Big borrow · Aave V3</b>", "<b>$75,000</b> borrowed"} {
+	for _, want := range []string{"💵 <b>Big borrow</b> · <b>Aave V3</b>", "<b>$75,000</b> borrowed"} {
 		if !strings.Contains(v.Caption, want) {
 			t.Errorf("big-borrow caption missing %q:\n%s", want, v.Caption)
 		}
@@ -320,9 +323,9 @@ func TestFormatSignal_LSTFlowMint(t *testing.T) {
 	v := FormatSignal(s, Context{}, "0xtx", testScanBase, testDash)
 
 	for _, want := range []string{
-		"🟢 <b>mETH staked in · Mantle</b>",
+		"🟢 <b>mETH staked in</b> · <b>Mantle</b>",
 		"<b>1,240 mETH</b>, fresh ETH into Mantle.",
-		"<b>Wallet</b>\n<code>" + s.Actor + "</code>",
+		"Wallet  <code>" + s.Actor + "</code>",
 	} {
 		if !strings.Contains(v.Caption, want) {
 			t.Errorf("lst-flow mint caption missing %q:\n%s", want, v.Caption)
@@ -354,7 +357,7 @@ func TestFormatSignal_LSTFlowBurnMoveMalformed(t *testing.T) {
 		SignalType: 4, Pool: "0xcmeth", Metric: "lst_flow",
 		Payload: []byte(`{"symbol":"cmETH","direction":"burn","value_lst":"50"}`),
 	}, Context{}, "", testScanBase, testDash)
-	if !strings.Contains(burn.Caption, "<b>cmETH redeemed · Mantle</b>") || !strings.Contains(burn.Caption, "<b>50 cmETH</b>") {
+	if !strings.Contains(burn.Caption, "<b>cmETH redeemed</b> · <b>Mantle</b>") || !strings.Contains(burn.Caption, "<b>50 cmETH</b>") {
 		t.Errorf("burn should render the redeemed headline:\n%s", burn.Caption)
 	}
 
@@ -362,7 +365,7 @@ func TestFormatSignal_LSTFlowBurnMoveMalformed(t *testing.T) {
 		SignalType: 4, Pool: "0xmeth", Metric: "lst_flow",
 		Payload: []byte(`{"symbol":"mETH","direction":"move","value_lst":"25"}`),
 	}, Context{}, "", testScanBase, testDash)
-	if !strings.Contains(move.Caption, "<b>mETH moved · Mantle</b>") || !strings.Contains(move.Caption, "<b>25 mETH</b>") {
+	if !strings.Contains(move.Caption, "<b>mETH moved</b> · <b>Mantle</b>") || !strings.Contains(move.Caption, "<b>25 mETH</b>") {
 		t.Errorf("move should render the moved headline:\n%s", move.Caption)
 	}
 
@@ -370,18 +373,15 @@ func TestFormatSignal_LSTFlowBurnMoveMalformed(t *testing.T) {
 		SignalType: 4, Pool: "0xcda86a272531e8640cd7f1a92c01839911b90bb0", Metric: "lst_flow",
 		Payload: []byte(`not json`),
 	}, Context{}, "", testScanBase, testDash)
-	if !strings.Contains(malformed.Caption, "<b>LST moved · Mantle</b>") {
+	if !strings.Contains(malformed.Caption, "<b>LST moved</b> · <b>Mantle</b>") {
 		t.Errorf("malformed lst-flow should still render the default verb:\n%s", malformed.Caption)
 	}
 	if buttonURL(malformed, "View token") == "" {
 		t.Errorf("malformed lst-flow should still expose the token button:\n%s", malformed.Caption)
 	}
-	if !strings.Contains(malformed.Caption, "<b>Token</b>\n<code>"+malformed.Card.Headline) {
-		// Headline falls back to the short pool address for an unknown symbol; the copy
-		// block must carry the full address.
-		if !strings.Contains(malformed.Caption, "<code>0xcda86a272531e8640cd7f1a92c01839911b90bb0</code>") {
-			t.Errorf("actor-less lst-flow should copy the token address:\n%s", malformed.Caption)
-		}
+	// No actor: the token address becomes the tap-to-copy artifact.
+	if !strings.Contains(malformed.Caption, "Token  <code>0xcda86a272531e8640cd7f1a92c01839911b90bb0</code>") {
+		t.Errorf("actor-less lst-flow should copy the token address:\n%s", malformed.Caption)
 	}
 }
 
@@ -399,10 +399,10 @@ func TestFormatSignal_Depeg(t *testing.T) {
 	v := FormatSignal(s, Context{}, "0xtxdepeg", testScanBase, testDash)
 
 	for _, want := range []string{
-		"⚠️ <b>Depeg alert · USDe</b>",
+		"⚠️ <b>Depeg alert</b> · <b>USDe</b>",
 		"USDe trading at <b>$0.971</b>, <b>290 bps below</b> the $1 peg.",
 		"Exposed: USDC/USDe · USDT/USDe.",
-		"<b>Token</b>\n<code>" + s.Pool + "</code>",
+		"Token  <code>" + s.Pool + "</code>",
 	} {
 		if !strings.Contains(v.Caption, want) {
 			t.Errorf("depeg caption missing %q:\n%s", want, v.Caption)
@@ -437,6 +437,7 @@ func TestCaption_BudgetWithLongNote(t *testing.T) {
 	usd := decFromStr("48200")
 	s := store.Signal{
 		SignalType: 2,
+		CreatedAt:  time.Date(2026, 6, 12, 14, 31, 0, 0, time.UTC), // exercises the tg-time footer
 		Pool:       "0xeafc4d6d4c3391cd4fc10c85d2f5f972d58c0dd5",
 		Metric:     "whale_swap",
 		Actor:      "0x8d58a3f1c0b2e7a9d4f6c1b8e2a05d7f3c9b6e10",
@@ -458,16 +459,12 @@ func TestCaption_BudgetWithLongNote(t *testing.T) {
 	}
 }
 
+var tagRe = regexp.MustCompile(`<[^>]*>`)
+
 // visibleLen approximates Telegram's caption accounting: entities do not count, so the
 // HTML tags are stripped and entity-escapes collapse back to one character.
 func visibleLen(html string) int {
-	stripped := html
-	for _, tag := range []string{
-		"<b>", "</b>", "<code>", "</code>",
-		"<blockquote expandable>", "</blockquote>",
-	} {
-		stripped = strings.ReplaceAll(stripped, tag, "")
-	}
+	stripped := tagRe.ReplaceAllString(html, "")
 	for entity, ch := range map[string]string{"&amp;": "&", "&lt;": "<", "&gt;": ">"} {
 		stripped = strings.ReplaceAll(stripped, entity, ch)
 	}
@@ -542,5 +539,23 @@ func TestClampRunes(t *testing.T) {
 	got := clampRunes(long, 10)
 	if r := []rune(got); len(r) != 10 || r[9] != '…' {
 		t.Errorf("clampRunes long = %q (%d runes)", got, len(r))
+	}
+}
+
+// timeFooter emits the three tg-time entities (relative, long date, short clock) sharing
+// the signal's Unix time, with a static fallback for clients that predate the entity.
+func TestTimeFooter(t *testing.T) {
+	ts := time.Date(2026, 6, 12, 14, 31, 0, 0, time.UTC).Unix()
+	got := timeFooter(ts)
+	for _, want := range []string{
+		fmt.Sprintf(`unix=%d format="r"`, ts),
+		fmt.Sprintf(`unix=%d format="D"`, ts),
+		fmt.Sprintf(`unix=%d format="t"`, ts),
+		"June 12, 2026", // long-date fallback
+		"14:31",         // clock fallback
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("timeFooter missing %q:\n%s", want, got)
+		}
 	}
 }
