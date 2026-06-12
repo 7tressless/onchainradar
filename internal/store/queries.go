@@ -210,6 +210,31 @@ func (d *DB) ListEnabledPools(ctx context.Context) ([]Pool, error) {
 	return out, nil
 }
 
+// GetPool returns the registry entry for a single pool by address (lowercased), or
+// (zero, false, nil) when no such pool exists. It serves the delivery path, which needs a
+// signal's pool label and dex to render a readable alert instead of a raw address.
+func (d *DB) GetPool(ctx context.Context, address string) (Pool, bool, error) {
+	const q = `
+		SELECT address, dex, token0, token1, dec0, dec1,
+		       COALESCE(label,''), enabled, COALESCE(source_url,''),
+		       z_threshold, whale_min_multiple, bin_step
+		FROM pools
+		WHERE address = $1`
+	var p Pool
+	err := d.Pool.QueryRow(ctx, q, strings.ToLower(strings.TrimSpace(address))).Scan(
+		&p.Address, &p.Dex, &p.Token0, &p.Token1, &p.Dec0, &p.Dec1,
+		&p.Label, &p.Enabled, &p.SourceURL,
+		&p.ZThreshold, &p.WhaleMinMultiple, &p.BinStep,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Pool{}, false, nil
+	}
+	if err != nil {
+		return Pool{}, false, fmt.Errorf("store: get pool %s: %w", address, err)
+	}
+	return p, true, nil
+}
+
 // PoolPricesUSD returns the latest display price per pool (keyed by lowercase pool
 // address), skipping pools with no price recorded yet. pool_stats.price_usd is token0's
 // market price, so a detector can value a non-stable swap's token0 leg at it to fill the

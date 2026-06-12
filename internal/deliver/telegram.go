@@ -1,11 +1,12 @@
-// Package deliver renders detector signals as Telegram messages and ships them via the
-// Telegram Bot API.
+// Package deliver renders detector signals as Telegram channel posts and ships them via
+// the Telegram Bot API.
 //
 // This file is a minimal Bot API client (net/http + encoding/json, no SDK) wrapping
-// sendMessage and editMessageText with backoff on 429/5xx and the API's retry_after hint.
-// Both endpoints exist because enrichment is async: the hot path sends the alert with
-// sendMessage and records the message_id; the enrich stage later edits the analyst note
-// into that same message.
+// sendPhoto, sendMessage, editMessageCaption, and editMessageText with backoff on
+// 429/5xx and the API's retry_after hint. The send/edit pairs exist because enrichment
+// is async: the hot path sends the alert (a card photo, or plain text as the fallback)
+// and records the message_id; the enrich stage later edits the analyst note into that
+// same message.
 package deliver
 
 import (
@@ -15,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strconv"
 	"strings"
@@ -48,22 +50,47 @@ func NewTelegram(token, chatID string) *Telegram {
 	}
 }
 
+// inlineButton is one inline-keyboard URL button: a label and the https URL it opens.
+type inlineButton struct {
+	Text string `json:"text"`
+	URL  string `json:"url"`
+}
+
+// inlineKeyboard is the reply_markup payload for a grid of URL buttons under a message.
+// Channel posts use URL buttons (not callback), so serving them needs no bot update loop.
+type inlineKeyboard struct {
+	Rows [][]inlineButton `json:"inline_keyboard"`
+}
+
 // sendMessageRequest is the Bot API sendMessage body.
 type sendMessageRequest struct {
-	ChatID                string `json:"chat_id"`
-	Text                  string `json:"text"`
-	ParseMode             string `json:"parse_mode,omitempty"`
-	DisableWebPagePreview bool   `json:"disable_web_page_preview"`
+	ChatID                string          `json:"chat_id"`
+	Text                  string          `json:"text"`
+	ParseMode             string          `json:"parse_mode,omitempty"`
+	DisableWebPagePreview bool            `json:"disable_web_page_preview"`
+	ReplyMarkup           *inlineKeyboard `json:"reply_markup,omitempty"`
 }
 
 // editMessageTextRequest is the Bot API editMessageText body. It targets a sent message
-// by (chat_id, message_id) with the same parse_mode/preview as the original send.
+// by (chat_id, message_id) with the same parse_mode/preview as the original send, and
+// re-sends reply_markup because editMessageText drops a message's buttons without it.
 type editMessageTextRequest struct {
-	ChatID                string `json:"chat_id"`
-	MessageID             int64  `json:"message_id"`
-	Text                  string `json:"text"`
-	ParseMode             string `json:"parse_mode,omitempty"`
-	DisableWebPagePreview bool   `json:"disable_web_page_preview"`
+	ChatID                string          `json:"chat_id"`
+	MessageID             int64           `json:"message_id"`
+	Text                  string          `json:"text"`
+	ParseMode             string          `json:"parse_mode,omitempty"`
+	DisableWebPagePreview bool            `json:"disable_web_page_preview"`
+	ReplyMarkup           *inlineKeyboard `json:"reply_markup,omitempty"`
+}
+
+// editMessageCaptionRequest is the Bot API editMessageCaption body: the photo-message
+// twin of editMessageText, with the same resend-the-keyboard requirement.
+type editMessageCaptionRequest struct {
+	ChatID      string          `json:"chat_id"`
+	MessageID   int64           `json:"message_id"`
+	Caption     string          `json:"caption"`
+	ParseMode   string          `json:"parse_mode,omitempty"`
+	ReplyMarkup *inlineKeyboard `json:"reply_markup,omitempty"`
 }
 
 type telegramAPIResponse struct {
@@ -83,11 +110,12 @@ type telegramParams struct {
 	RetryAfter int `json:"retry_after,omitempty"`
 }
 
-// Send posts text to the configured chat and returns the new message's id (ready to
-// persist via store.UpdateSignalTGMessageID and pass to EditMessageText). text is already
-// formatted for ParseMode; callers escape dynamic fields via EscapeHTML. Retry policy and
-// token redaction are handled in call. On any error it returns ("", err).
-func (t *Telegram) Send(ctx context.Context, text string) (string, error) {
+// Send posts text (with an optional inline keyboard) to the configured chat and returns
+// the new message's id (ready to persist via store.UpdateSignalTGMessageID and pass to
+// EditMessageText). text is already formatted for ParseMode; callers escape dynamic
+// fields via EscapeHTML. A nil keyboard sends a plain message. Retry policy and token
+// redaction are handled in call. On any error it returns ("", err).
+func (t *Telegram) Send(ctx context.Context, text string, kb *inlineKeyboard) (string, error) {
 	// Guard the nil receiver before any t.* deref below (call also checks, but later).
 	if t == nil {
 		return "", errors.New("deliver: nil telegram client")
@@ -97,12 +125,13 @@ func (t *Telegram) Send(ctx context.Context, text string) (string, error) {
 		Text:                  text,
 		ParseMode:             t.ParseMode,
 		DisableWebPagePreview: true,
+		ReplyMarkup:           kb,
 	})
 	if err != nil {
 		return "", fmt.Errorf("deliver: marshal sendMessage: %w", err)
 	}
 
-	resp, err := t.call(ctx, "sendMessage", body)
+	resp, err := t.call(ctx, "sendMessage", contentTypeJSON, body)
 	if err != nil {
 		return "", err
 	}
@@ -113,11 +142,75 @@ func (t *Telegram) Send(ctx context.Context, text string) (string, error) {
 	return strconv.FormatInt(resp.Result.MessageID, 10), nil
 }
 
-// EditMessageText replaces the text of a sent message, addressed by the id Send
-// returned: how the enrich stage adds the analyst note to an alert sent without it.
+// SendPhoto posts a PNG with an HTML caption (and an optional inline keyboard) to the
+// configured chat and returns the new message's id, the photo twin of Send. The Bot API
+// caps captions at 1024 characters; FormatSignal builds within that budget. The photo
+// goes as multipart/form-data; caption escaping rules match Send.
+func (t *Telegram) SendPhoto(ctx context.Context, photo []byte, caption string, kb *inlineKeyboard) (string, error) {
+	if t == nil {
+		return "", errors.New("deliver: nil telegram client")
+	}
+	if len(photo) == 0 {
+		return "", errors.New("deliver: sendPhoto with empty photo")
+	}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	if err := writePhotoForm(mw, t.ChatID, t.ParseMode, photo, caption, kb); err != nil {
+		return "", fmt.Errorf("deliver: build sendPhoto form: %w", err)
+	}
+
+	resp, err := t.call(ctx, "sendPhoto", mw.FormDataContentType(), body.Bytes())
+	if err != nil {
+		return "", err
+	}
+	if resp.Result == nil {
+		return "", errors.New("deliver: telegram sendPhoto ok but no message_id in result")
+	}
+	return strconv.FormatInt(resp.Result.MessageID, 10), nil
+}
+
+// writePhotoForm fills the sendPhoto multipart form: scalar fields, the keyboard as a
+// JSON field (the Bot API's form encoding for reply_markup), then the PNG file part.
+func writePhotoForm(mw *multipart.Writer, chatID, parseMode string, photo []byte, caption string, kb *inlineKeyboard) error {
+	if err := mw.WriteField("chat_id", chatID); err != nil {
+		return err
+	}
+	if caption != "" {
+		if err := mw.WriteField("caption", caption); err != nil {
+			return err
+		}
+		if parseMode != "" {
+			if err := mw.WriteField("parse_mode", parseMode); err != nil {
+				return err
+			}
+		}
+	}
+	if kb != nil {
+		markup, err := json.Marshal(kb)
+		if err != nil {
+			return err
+		}
+		if err := mw.WriteField("reply_markup", string(markup)); err != nil {
+			return err
+		}
+	}
+	fw, err := mw.CreateFormFile("photo", "signal.png")
+	if err != nil {
+		return err
+	}
+	if _, err := fw.Write(photo); err != nil {
+		return err
+	}
+	return mw.Close()
+}
+
+// EditMessageText replaces the text (and re-sends the inline keyboard) of a sent message,
+// addressed by the id Send returned: how the enrich stage adds the analyst note to an
+// alert sent without it. The keyboard must be passed again or Telegram drops the buttons.
 // Same retry policy and token redaction as Send. A malformed/empty messageID returns
 // immediately without an API call.
-func (t *Telegram) EditMessageText(ctx context.Context, messageID, text string) error {
+func (t *Telegram) EditMessageText(ctx context.Context, messageID, text string, kb *inlineKeyboard) error {
 	if t == nil {
 		return errors.New("deliver: nil telegram client")
 	}
@@ -132,22 +225,56 @@ func (t *Telegram) EditMessageText(ctx context.Context, messageID, text string) 
 		Text:                  text,
 		ParseMode:             t.ParseMode,
 		DisableWebPagePreview: true,
+		ReplyMarkup:           kb,
 	})
 	if err != nil {
 		return fmt.Errorf("deliver: marshal editMessageText: %w", err)
 	}
 
-	if _, err := t.call(ctx, "editMessageText", body); err != nil {
+	if _, err := t.call(ctx, "editMessageText", contentTypeJSON, body); err != nil {
 		return err
 	}
 	return nil
 }
 
+// EditMessageCaption replaces the caption (and re-sends the inline keyboard) of a sent
+// photo message: how the enrich stage adds the analyst note to a card alert. Same
+// contract as EditMessageText, which remains the edit path for text-fallback alerts.
+func (t *Telegram) EditMessageCaption(ctx context.Context, messageID, caption string, kb *inlineKeyboard) error {
+	if t == nil {
+		return errors.New("deliver: nil telegram client")
+	}
+	id, err := strconv.ParseInt(strings.TrimSpace(messageID), 10, 64)
+	if err != nil {
+		return fmt.Errorf("deliver: edit caption: invalid message id %q: %w", messageID, err)
+	}
+
+	body, err := json.Marshal(editMessageCaptionRequest{
+		ChatID:      t.ChatID,
+		MessageID:   id,
+		Caption:     caption,
+		ParseMode:   t.ParseMode,
+		ReplyMarkup: kb,
+	})
+	if err != nil {
+		return fmt.Errorf("deliver: marshal editMessageCaption: %w", err)
+	}
+
+	if _, err := t.call(ctx, "editMessageCaption", contentTypeJSON, body); err != nil {
+		return err
+	}
+	return nil
+}
+
+// contentTypeJSON is the content type for the JSON-bodied Bot API methods; sendPhoto
+// passes its multipart boundary type instead.
+const contentTypeJSON = "application/json"
+
 // call posts a pre-marshalled body to the named Bot API method, applying the shared
 // retry policy, and returns the parsed (ok=true) response. It is the single transport
-// path for sendMessage and editMessageText, so backoff, 429/5xx classification, and
-// token redaction live in one place. On failure it returns a token-redacted error.
-func (t *Telegram) call(ctx context.Context, method string, body []byte) (*telegramAPIResponse, error) {
+// path for every method (JSON and multipart alike), so backoff, 429/5xx classification,
+// and token redaction live in one place. On failure it returns a token-redacted error.
+func (t *Telegram) call(ctx context.Context, method, contentType string, body []byte) (*telegramAPIResponse, error) {
 	if t == nil {
 		return nil, errors.New("deliver: nil telegram client")
 	}
@@ -188,7 +315,7 @@ func (t *Telegram) call(ctx context.Context, method string, body []byte) (*teleg
 			// Construction errors will not fix themselves on retry.
 			return backoff.Permanent(fmt.Errorf("deliver: build request: %w", err))
 		}
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 
 		resp, err := httpClient.Do(req)
 		if err != nil {

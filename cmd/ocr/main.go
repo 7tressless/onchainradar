@@ -48,6 +48,10 @@ const (
 	// dashboard rows and Telegram alerts.
 	mantleScanBase = "https://mantlescan.xyz"
 
+	// dashboardURL is the public dashboard link surfaced as a button on every Telegram
+	// alert, so a channel reader can jump from a signal to the live feed.
+	dashboardURL = "https://onchainradar.tech"
+
 	// poolsConfigPath is the curated pool registry seeded into Postgres before
 	// the collector starts.
 	poolsConfigPath = "config/pools.yaml"
@@ -836,6 +840,36 @@ func persistAttestTx(ctx context.Context, write func(context.Context) error) err
 	return err
 }
 
+// deliverContext resolves a signal's readable pool metadata (pair label, dex) for the
+// Telegram alert, so it shows "USDe/WMNT · Agni" instead of a raw address. A missing pool
+// or a lookup error degrades to an empty context (the renderer falls back to the short
+// address) and never blocks delivery.
+func deliverContext(ctx context.Context, db *store.DB, sig store.Signal) deliver.Context {
+	pool, ok, err := db.GetPool(ctx, sig.Pool)
+	if err != nil {
+		log.Warn().Err(err).Int64("signal_id", sig.ID).Msg("deliver: pool lookup failed; using address")
+		return deliver.Context{}
+	}
+	if !ok {
+		return deliver.Context{}
+	}
+	return deliver.Context{PoolLabel: pool.Label, Dex: prettyDex(pool.Dex)}
+}
+
+// prettyDex maps a registry dex id to its display name for alerts.
+func prettyDex(dex string) string {
+	switch dex {
+	case "agni":
+		return "Agni"
+	case "merchant_moe":
+		return "Merchant Moe"
+	case "fusionx":
+		return "FusionX"
+	default:
+		return dex
+	}
+}
+
 // processSignal runs the per-signal hot path for one freshly detected signal:
 // attest, deliver the Telegram alert, then record the sent message id (so the async
 // enrich stage can later edit the note into that message). Enrichment is not here; it
@@ -901,8 +935,9 @@ func processSignal(
 	// message later via the id recorded below. Bound the synchronous send so a black-holing
 	// Telegram endpoint cannot stall detection/attestation; on timeout the alert is skipped
 	// (logged) and the signal is already attested and on the dashboard.
+	dc := deliverContext(ctx, db, sig)
 	dctx, dcancel := context.WithTimeout(ctx, deliverTimeout)
-	msgID, err := deliver.Dispatch(dctx, tg, sig, sig.Pool, attestTx, mantleScanBase)
+	msgID, err := deliver.Dispatch(dctx, tg, sig, dc, attestTx, mantleScanBase, dashboardURL)
 	dcancel()
 	if err != nil {
 		log.Error().Err(err).Int64("signal_id", sig.ID).Msg("detect: telegram dispatch failed")
@@ -1066,13 +1101,13 @@ func enrichOne(ctx context.Context, db *store.DB, provider enrich.Provider, tg *
 	}
 
 	// Edit the note into the already-sent alert (best-effort), reusing the same
-	// FormatSignal/label/tx Dispatch used so the message changes only by the Note line.
+	// FormatSignal Dispatch used so the caption changes only by the analyst note.
 	// With no message id (Telegram off, or send/record failed) there is nothing to edit.
 	if tg == nil || sig.TGMessageID == "" {
 		return
 	}
-	text := deliver.FormatSignal(sig, sig.Pool, sig.AttestTx, mantleScanBase)
-	if eerr := tg.EditMessageText(ctx, sig.TGMessageID, text); eerr != nil {
+	view := deliver.FormatSignal(sig, deliverContext(ctx, db, sig), sig.AttestTx, mantleScanBase, dashboardURL)
+	if eerr := deliver.EditSignal(ctx, tg, sig.TGMessageID, view); eerr != nil {
 		log.Error().Err(eerr).Int64("signal_id", sig.ID).Str("tg_message_id", sig.TGMessageID).
 			Msg("enrich: edit telegram note failed")
 		return
@@ -1788,7 +1823,7 @@ func watchdogCheck(ctx context.Context, db *store.DB, tg *deliver.Telegram, thre
 		// Bound the send so a black-holing Telegram endpoint cannot stall the
 		// watchdog tick; a failure is logged, never fatal.
 		sctx, scancel := context.WithTimeout(ctx, deliverTimeout)
-		if _, serr := tg.Send(sctx, msg); serr != nil {
+		if _, serr := tg.Send(sctx, msg, nil); serr != nil {
 			log.Error().Err(serr).Msg("watchdog: stall telegram alert failed")
 		}
 		scancel()

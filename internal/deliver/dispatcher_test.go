@@ -4,15 +4,20 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 
+	"ocr/internal/deliver/card"
 	"ocr/internal/store"
 )
 
-const testScanBase = "https://mantlescan.xyz"
+const (
+	testScanBase = "https://mantlescan.xyz"
+	testDash     = "https://onchainradar.tech"
+)
 
-// decFromStr builds a decimal from a string for the lending size_usd tests.
+// decFromStr builds a decimal from a string for the size_usd tests.
 func decFromStr(s string) decimal.Decimal {
 	d, err := decimal.NewFromString(s)
 	if err != nil {
@@ -21,320 +26,521 @@ func decFromStr(s string) decimal.Decimal {
 	return d
 }
 
-// A flow (type 1) signal renders the original z-score framing: a "z=" title, a
-// "Z-score:" line, the pool link, and (when set) the note + attestation. This
-// guards that the type-3 branch leaves the existing type-1/2 rendering unchanged.
-func TestFormatSignal_FlowUnchanged(t *testing.T) {
+// buttonURL returns the URL of the first inline button whose label equals text, or ""
+// when the view has no such button. It lets the tests assert the keyboard wiring without
+// caring about row layout.
+func buttonURL(v MessageView, text string) string {
+	if v.Keyboard == nil {
+		return ""
+	}
+	for _, row := range v.Keyboard.Rows {
+		for _, btn := range row {
+			if btn.Text == text {
+				return btn.URL
+			}
+		}
+	}
+	return ""
+}
+
+// noZScoreJargon fails when an alert exposes the raw z-score wording the channel format
+// replaced with plain-language multiples.
+func noZScoreJargon(t *testing.T, text string) {
+	t.Helper()
+	for _, banned := range []string{"z-score", "z=", "Z-score", "zscore"} {
+		if strings.Contains(text, banned) {
+			t.Errorf("alert leaked z-score jargon %q:\n%s", banned, text)
+		}
+	}
+}
+
+// specValue returns the value of the card spec labelled label, or "".
+func specValue(d card.Data, label string) string {
+	for _, s := range d.Specs {
+		if s.Label == label {
+			return s.Value
+		}
+	}
+	return ""
+}
+
+// A flow anomaly (type 1) reads as a plain-language burst over the pool's own baseline,
+// with a pool copy block (a flow has no actor) and the matching card fields.
+func TestFormatSignal_Flow(t *testing.T) {
 	s := store.Signal{
+		ID:         142,
+		CreatedAt:  time.Date(2026, 6, 12, 14, 31, 0, 0, time.UTC),
 		SignalType: 1,
 		Pool:       "0xbcf99c834e65e8a58090e20edc058279317865bd",
 		Metric:     "vol0",
 		Zscore:     9.12,
-		LLMNote:    "Volume spiked. medium",
+		Payload:    []byte(`{"latest":9120,"median":1000}`),
+		LLMNote:    "Volume spiked.",
 	}
-	out := FormatSignal(s, "USDC/USDe", "0xtxhash", testScanBase)
+	v := FormatSignal(s, Context{PoolLabel: "USDC/USDe", Dex: "Agni"}, "0xtxhash", testScanBase, testDash)
 
 	for _, want := range []string{
-		"<b>vol0</b> z=9.12",
-		"Pool: USDC/USDe",
-		"Z-score: 9.12",
-		"Note: Volume spiked. medium",
-		"/tx/0xtxhash",
-		"Attestation:",
+		"📊 <b>Volume spike · USDC/USDe · Agni</b>",
+		"<b>9.1×</b> this pool's own 48-hour average",
+		"<blockquote expandable><b>Analyst take</b>\nVolume spiked.</blockquote>",
+		"<b>Pool</b>\n<code>" + s.Pool + "</code>",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("flow message missing %q:\n%s", want, out)
+		if !strings.Contains(v.Caption, want) {
+			t.Errorf("flow caption missing %q:\n%s", want, v.Caption)
 		}
 	}
-	// It must not use smart-money framing.
-	for _, banned := range []string{"smart money", "score=", "Score:", "Wallet:"} {
-		if strings.Contains(out, banned) {
-			t.Errorf("flow message leaked smart-money wording %q:\n%s", banned, out)
-		}
+	if got := buttonURL(v, "On-chain proof"); got != testScanBase+"/tx/0xtxhash" {
+		t.Errorf("flow proof button = %q", got)
 	}
+	if got := buttonURL(v, "View pool"); got != testScanBase+"/address/"+s.Pool {
+		t.Errorf("flow pool button = %q", got)
+	}
+	if got := buttonURL(v, "Live dashboard"); got != testDash {
+		t.Errorf("flow dashboard button = %q", got)
+	}
+	if got := buttonURL(v, "Wallet"); got != "" {
+		t.Errorf("flow has no actor, so no wallet button; got %q", got)
+	}
+
+	c := v.Card
+	if c.Kind != "flow" || c.TypeLabel != "VOLUME SPIKE" {
+		t.Errorf("flow card kind/label = %q/%q", c.Kind, c.TypeLabel)
+	}
+	if c.Headline != "USDC / USDe" {
+		t.Errorf("flow card headline = %q, want spaced pair", c.Headline)
+	}
+	if c.SigID != "SIG #142" {
+		t.Errorf("flow card sig id = %q", c.SigID)
+	}
+	if got := specValue(c, "VS 48H MEDIAN"); got != "9.1×" {
+		t.Errorf("flow card multiple spec = %q", got)
+	}
+	if got := specValue(c, "VENUE"); got != "AGNI" {
+		t.Errorf("flow card venue spec = %q", got)
+	}
+	if c.Timestamp != "12 JUN 2026 · 14:31 UTC" {
+		t.Errorf("flow card timestamp = %q", c.Timestamp)
+	}
+	if c.AttestTxShort == "" {
+		t.Error("flow card attest tx short is empty for an attested signal")
+	}
+	noZScoreJargon(t, v.Caption)
 }
 
-// A whale (type 2) signal also keeps the z-score framing (it is per-event but
-// still scored by a z-score), unchanged by the type-3 branch.
-func TestFormatSignal_WhaleUnchanged(t *testing.T) {
+// A whale (type 2) shows the dollar size and the multiple of the pool's usual trade,
+// with the wallet as the copy block. With an empty attest tx the proof button is
+// omitted and the card footer falls back to the pending state.
+func TestFormatSignal_Whale(t *testing.T) {
+	usd := decFromStr("48200")
 	s := store.Signal{
 		SignalType: 2,
 		Pool:       "0xeafc4d6d4c3391cd4fc10c85d2f5f972d58c0dd5",
 		Metric:     "whale_swap",
-		Zscore:     8.5,
+		Zscore:     6.2,
+		Actor:      "0x8d58a3f1c0b2e7a9d4f6c1b8e2a05d7f3c9b6e10",
+		SizeUSD:    &usd,
+		Payload:    []byte(`{"size0":18000,"median":1000}`),
 	}
-	out := FormatSignal(s, "USDe/WMNT", "", testScanBase)
-	if !strings.Contains(out, "<b>whale_swap</b> z=8.50") || !strings.Contains(out, "Z-score: 8.50") {
-		t.Errorf("whale message lost z-score framing:\n%s", out)
+	v := FormatSignal(s, Context{PoolLabel: "USDe/WMNT", Dex: "Agni"}, "", testScanBase, testDash)
+
+	for _, want := range []string{
+		"🐋 <b>Whale swap · USDe/WMNT · Agni</b>",
+		"<b>$48,200</b> swap, <b>18×</b> the pool's usual trade size.",
+		"<b>Wallet</b>\n<code>" + s.Actor + "</code>",
+	} {
+		if !strings.Contains(v.Caption, want) {
+			t.Errorf("whale caption missing %q:\n%s", want, v.Caption)
+		}
 	}
-	// No attestation tx -> no Attestation line.
-	if strings.Contains(out, "Attestation:") {
-		t.Errorf("whale message with empty tx should omit the attestation line:\n%s", out)
+	if got := buttonURL(v, "On-chain proof"); got != "" {
+		t.Errorf("whale with empty tx must omit the proof button; got %q", got)
 	}
+	if got := buttonURL(v, "Wallet"); got != testScanBase+"/address/"+s.Actor {
+		t.Errorf("whale wallet button = %q", got)
+	}
+
+	c := v.Card
+	if c.Kind != "whale" || c.Headline != "USDe / WMNT" {
+		t.Errorf("whale card kind/headline = %q/%q", c.Kind, c.Headline)
+	}
+	if got := specValue(c, "NOTIONAL"); got != "$48.2K" {
+		t.Errorf("whale card notional spec = %q", got)
+	}
+	if got := specValue(c, "VS POOL MEDIAN"); got != "18×" {
+		t.Errorf("whale card multiple spec = %q", got)
+	}
+	if c.AttestTxShort != "" {
+		t.Errorf("unattested whale card must leave the footer tx empty, got %q", c.AttestTxShort)
+	}
+	noZScoreJargon(t, v.Caption)
 }
 
-// A smart-money (type 3) signal is framed as a score finding (not a z-score) and
-// names the accumulating wallet decoded from the payload, with the accumulation
-// evidence.
-func TestFormatSignal_SmartMoneyScoreFraming(t *testing.T) {
+// A smart-money (type 3) alert reads as accumulation with a 0..100 score and the
+// evidence; a decode failure still renders the score.
+func TestFormatSignal_SmartMoney(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{
 		"actor":          "0x00000000000000000000000000000000000000aa",
-		"accum_swaps":    4,
-		"distinct_pools": 2,
-		"size_multiple":  7.5,
-		"score":          56,
-		"window_hours":   24,
+		"accum_swaps":    6,
+		"distinct_pools": 3,
+		"size_multiple":  12.0,
 	})
 	s := store.Signal{
 		SignalType: 3,
 		Pool:       "0xeafc4d6d4c3391cd4fc10c85d2f5f972d58c0dd5",
 		Metric:     "smart_money",
-		Zscore:     56, // the composite score, carried in Zscore
+		Zscore:     78, // the composite score, carried in Zscore
+		Actor:      "0x00000000000000000000000000000000000000aa",
 		Payload:    payload,
 	}
-	out := FormatSignal(s, "USDe/WMNT", "0xtx3", testScanBase)
+	v := FormatSignal(s, Context{PoolLabel: "USDC/USDe"}, "0xtx3", testScanBase, testDash)
 
 	for _, want := range []string{
-		"<b>smart money</b> score=56",
-		"Score: 56",
-		"Wallet:",
-		"/address/0x00000000000000000000000000000000000000aa",
-		"4 large swaps across 2 pool(s)",
-		"7.5x pool median",
-		"/tx/0xtx3",
+		"🧠 <b>Smart money · USDC/USDe</b>",
+		"<b>6 large buys</b> across <b>3 pool(s)</b>",
+		"Score <b>78/100</b>",
+		"<b>Wallet</b>\n<code>" + s.Actor + "</code>",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("smart-money message missing %q:\n%s", want, out)
+		if !strings.Contains(v.Caption, want) {
+			t.Errorf("smart-money caption missing %q:\n%s", want, v.Caption)
 		}
 	}
-	// It must not use the z-score framing.
-	for _, banned := range []string{"z=", "Z-score:"} {
-		if strings.Contains(out, banned) {
-			t.Errorf("smart-money message leaked z-score wording %q:\n%s", banned, out)
-		}
+	if got := buttonURL(v, "Wallet"); got != testScanBase+"/address/"+s.Actor {
+		t.Errorf("smart-money wallet button = %q", got)
 	}
+
+	c := v.Card
+	if got := specValue(c, "SMART SCORE"); got != "78" {
+		t.Errorf("smart card score spec = %q", got)
+	}
+	if got := specValue(c, "LARGE BUYS"); got != "6" {
+		t.Errorf("smart card buys spec = %q", got)
+	}
+	if got := specValue(c, "POOLS"); got != "3" {
+		t.Errorf("smart card pools spec = %q", got)
+	}
+	noZScoreJargon(t, v.Caption)
 }
 
-// A smart-money signal whose payload fails to decode still renders a valid alert
-// (score + pool, no wallet line) rather than dropping the alert or panicking.
-func TestFormatSignal_SmartMoneyMalformedPayload(t *testing.T) {
+func TestFormatSignal_SmartMoneyMalformed(t *testing.T) {
 	s := store.Signal{
-		SignalType: 3,
-		Pool:       "0xpool",
-		Metric:     "smart_money",
-		Zscore:     50,
-		Payload:    []byte(`{not json`),
+		SignalType: 3, Pool: "0xpool", Metric: "smart_money", Zscore: 50,
+		Payload: []byte(`{not json`),
 	}
-	out := FormatSignal(s, "USDe/WMNT", "", testScanBase)
-	if !strings.Contains(out, "score=50") || !strings.Contains(out, "Score: 50") {
-		t.Errorf("malformed-payload smart-money message lost the score:\n%s", out)
+	v := FormatSignal(s, Context{PoolLabel: "USDC/USDe"}, "", testScanBase, testDash)
+	if !strings.Contains(v.Caption, "Score <b>50/100</b>") {
+		t.Errorf("malformed smart-money lost the score:\n%s", v.Caption)
 	}
-	if strings.Contains(out, "Wallet:") {
-		t.Errorf("malformed payload should omit the wallet line:\n%s", out)
+	if strings.Contains(v.Caption, "large buys") {
+		t.Errorf("malformed payload should omit the evidence line:\n%s", v.Caption)
 	}
 }
 
-// A liquidation (type 5) renders the lending framing: the "liquidation" headline
-// with the USD size, the borrower (subject) + liquidator (actor) linked, and no
-// z-score wording. This also guards the type-5 branch did not alter types 1/2/3.
+// A liquidation (type 5) shows the dollar size with a plain verb, a borrower-explorer
+// button, and the liquidator wallet as the copy block.
 func TestFormatSignal_Liquidation(t *testing.T) {
 	usd := decFromStr("50000")
 	s := store.Signal{
 		SignalType: 5,
-		Pool:       "0xborrower", // subject = the liquidated borrower
+		Pool:       "0xbcf99c834e65e8a58090e20edc058279317865bd",
 		Metric:     "liquidation",
 		Zscore:     7.7,
-		Actor:      "0xliquidatoreoa",
+		Actor:      "0x8d58a3f1c0b2e7a9d4f6c1b8e2a05d7f3c9b6e10",
 		SizeUSD:    &usd,
-		Payload:    []byte(`{"liquidator":"0xliquidatoreoa","user":"0xborrower","debt_asset":"0xusdt"}`),
 	}
-	out := FormatSignal(s, "", "0xtx", testScanBase)
+	v := FormatSignal(s, Context{}, "0xtx", testScanBase, testDash)
+
 	for _, want := range []string{
-		"<b>liquidation</b> ~$50000",
-		"Borrower: ",
-		"/address/0xborrower",
-		"Liquidator: ",
-		"/address/0xliquidatoreoa",
-		"/tx/0xtx",
+		"⚡ <b>Liquidation · Aave V3</b>",
+		"<b>$50,000</b> position liquidated",
+		"<b>Liquidator</b>\n<code>" + s.Actor + "</code>",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("liquidation message missing %q:\n%s", want, out)
+		if !strings.Contains(v.Caption, want) {
+			t.Errorf("liquidation caption missing %q:\n%s", want, v.Caption)
 		}
 	}
-	for _, banned := range []string{"z=", "Z-score:", "score=", "smart money"} {
-		if strings.Contains(out, banned) {
-			t.Errorf("liquidation message leaked %q:\n%s", banned, out)
-		}
+	if got := buttonURL(v, "View borrower"); got != testScanBase+"/address/"+s.Pool {
+		t.Errorf("liquidation borrower button = %q", got)
 	}
+	if got := buttonURL(v, "Wallet"); got != testScanBase+"/address/"+s.Actor {
+		t.Errorf("liquidation wallet button = %q", got)
+	}
+
+	c := v.Card
+	if c.Kind != "liq" || c.Headline != "AAVE V3" {
+		t.Errorf("liquidation card kind/headline = %q/%q", c.Kind, c.Headline)
+	}
+	if got := specValue(c, "EVENT"); got != "LIQUIDATION" {
+		t.Errorf("liquidation card event spec = %q", got)
+	}
+	if got := specValue(c, "SIZE"); got != "$50.0K" {
+		t.Errorf("liquidation card size spec = %q", got)
+	}
+	noZScoreJargon(t, v.Caption)
 }
 
-// A big borrow (type 6) renders the borrow framing: the "big borrow" headline with
-// the USD size, the reserve (subject) + borrower (actor) linked.
+// A big borrow (type 6) shows the dollar size with "borrowed" and a reserve button.
 func TestFormatSignal_BigBorrow(t *testing.T) {
 	usd := decFromStr("75000")
 	s := store.Signal{
 		SignalType: 6,
-		Pool:       "0xreserve", // subject = the borrowed reserve
+		Pool:       "0xa125af1a4704044501fe12ca9567ef1550e430e8",
 		Metric:     "big_borrow",
 		Zscore:     7.87,
-		Actor:      "0xborrowerwallet",
+		Actor:      "0x2c7b9e41a0d3f85c6b1e2a9d7f04c3b8e6a1d052",
 		SizeUSD:    &usd,
 	}
-	out := FormatSignal(s, "", "", testScanBase)
-	for _, want := range []string{
-		"<b>big borrow</b> ~$75000",
-		"Reserve: ",
-		"/address/0xreserve",
-		"Borrower: ",
-		"/address/0xborrowerwallet",
-	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("big-borrow message missing %q:\n%s", want, out)
+	v := FormatSignal(s, Context{}, "", testScanBase, testDash)
+
+	for _, want := range []string{"💵 <b>Big borrow · Aave V3</b>", "<b>$75,000</b> borrowed"} {
+		if !strings.Contains(v.Caption, want) {
+			t.Errorf("big-borrow caption missing %q:\n%s", want, v.Caption)
 		}
 	}
-	// No attestation tx -> no Attestation line; no z-score wording.
-	for _, banned := range []string{"Attestation:", "z=", "Z-score:"} {
-		if strings.Contains(out, banned) {
-			t.Errorf("big-borrow message leaked %q:\n%s", banned, out)
-		}
+	if got := buttonURL(v, "View reserve"); got != testScanBase+"/address/"+s.Pool {
+		t.Errorf("big-borrow reserve button = %q", got)
+	}
+	if got := buttonURL(v, "On-chain proof"); got != "" {
+		t.Errorf("empty tx must omit the proof button; got %q", got)
+	}
+	if got := specValue(v.Card, "EVENT"); got != "BORROW" {
+		t.Errorf("big-borrow card event spec = %q", got)
 	}
 }
 
-// A lending signal with no USD size (non-stable asset) and no payload still renders
-// a valid alert (kind + subject), proving the size and actor lines are optional.
-func TestFormatSignal_LendingNoSizeNoPayload(t *testing.T) {
-	s := store.Signal{
-		SignalType: 5,
-		Pool:       "0xborrower",
-		Metric:     "liquidation",
-		Zscore:     3,
-		// no SizeUSD, no Actor, no Payload
-	}
-	out := FormatSignal(s, "", "", testScanBase)
-	if !strings.Contains(out, "<b>liquidation</b>") || strings.Contains(out, "~$") {
-		t.Errorf("no-size liquidation should show the kind but no USD size:\n%s", out)
-	}
-	if !strings.Contains(out, "Borrower: ") {
-		t.Errorf("liquidation should still show the borrower subject:\n%s", out)
-	}
-}
-
-// An LST-flow (type 4) mint renders the LST framing: the "LST minted in" headline with
-// the whole-token amount + symbol, the token (subject) + actor linked, and no z-score
-// or USD wording. Guards that the type-4 branch did not alter types 1/2/3/5/6.
+// An LST-flow (type 4) mint reads as "staked in" with the grouped amount and a tagline,
+// and links the token and wallet.
 func TestFormatSignal_LSTFlowMint(t *testing.T) {
 	s := store.Signal{
 		SignalType: 4,
-		Pool:       "0xmeth", // subject = the LST token
+		Pool:       "0xcda86a272531e8640cd7f1a92c01839911b90bb0",
 		Metric:     "lst_flow",
-		Zscore:     5.0,
-		Actor:      "0xrecipienteoa",
-		Payload:    []byte(`{"symbol":"mETH","direction":"mint","value_lst":"100"}`),
+		Actor:      "0x91d4a2ff60bb18c3e7a0d9f5c2b8e41a6d037c2e",
+		Payload:    []byte(`{"symbol":"mETH","direction":"mint","value_lst":"1240"}`),
 	}
-	out := FormatSignal(s, "", "0xtx", testScanBase)
+	v := FormatSignal(s, Context{}, "0xtx", testScanBase, testDash)
+
 	for _, want := range []string{
-		"LST minted in",
-		"100 mETH",
-		"Token: ",
-		"/address/0xmeth",
-		"Actor: ",
-		"/address/0xrecipienteoa",
-		"/tx/0xtx",
+		"🟢 <b>mETH staked in · Mantle</b>",
+		"<b>1,240 mETH</b>, fresh ETH into Mantle.",
+		"<b>Wallet</b>\n<code>" + s.Actor + "</code>",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("lst-flow mint message missing %q:\n%s", want, out)
+		if !strings.Contains(v.Caption, want) {
+			t.Errorf("lst-flow mint caption missing %q:\n%s", want, v.Caption)
 		}
 	}
-	for _, banned := range []string{"z=", "Z-score:", "score=", "smart money", "~$"} {
-		if strings.Contains(out, banned) {
-			t.Errorf("lst-flow mint message leaked %q:\n%s", banned, out)
-		}
+	if got := buttonURL(v, "View token"); got != testScanBase+"/address/"+s.Pool {
+		t.Errorf("lst-flow token button = %q", got)
+	}
+	if got := buttonURL(v, "Wallet"); got != testScanBase+"/address/"+s.Actor {
+		t.Errorf("lst-flow wallet button = %q", got)
+	}
+
+	c := v.Card
+	if c.Kind != "lst" || c.Headline != "mETH" {
+		t.Errorf("lst card kind/headline = %q/%q", c.Kind, c.Headline)
+	}
+	if got := specValue(c, "DIRECTION"); got != "STAKED IN" {
+		t.Errorf("lst card direction spec = %q", got)
+	}
+	if got := specValue(c, "AMOUNT"); got != "1,240" {
+		t.Errorf("lst card amount spec = %q", got)
 	}
 }
 
-// An LST-flow burn renders the "redeemed out" headline; a move renders "moved". A
-// payload that fails to decode still produces a valid alert (kind + token subject).
-func TestFormatSignal_LSTFlowBurnAndMoveAndMalformed(t *testing.T) {
+// An LST-flow burn reads as "redeemed"; a move reads as "moved"; a malformed payload
+// still renders the default verb and the token button (token becomes the copy block).
+func TestFormatSignal_LSTFlowBurnMoveMalformed(t *testing.T) {
 	burn := FormatSignal(store.Signal{
 		SignalType: 4, Pool: "0xcmeth", Metric: "lst_flow",
 		Payload: []byte(`{"symbol":"cmETH","direction":"burn","value_lst":"50"}`),
-	}, "", "", testScanBase)
-	if !strings.Contains(burn, "LST redeemed out") || !strings.Contains(burn, "50 cmETH") {
-		t.Errorf("burn should render the redeemed-out headline:\n%s", burn)
+	}, Context{}, "", testScanBase, testDash)
+	if !strings.Contains(burn.Caption, "<b>cmETH redeemed · Mantle</b>") || !strings.Contains(burn.Caption, "<b>50 cmETH</b>") {
+		t.Errorf("burn should render the redeemed headline:\n%s", burn.Caption)
 	}
 
 	move := FormatSignal(store.Signal{
 		SignalType: 4, Pool: "0xmeth", Metric: "lst_flow",
 		Payload: []byte(`{"symbol":"mETH","direction":"move","value_lst":"25"}`),
-	}, "", "", testScanBase)
-	if !strings.Contains(move, "LST moved") || !strings.Contains(move, "25 mETH") {
-		t.Errorf("move should render the moved headline:\n%s", move)
+	}, Context{}, "", testScanBase, testDash)
+	if !strings.Contains(move.Caption, "<b>mETH moved · Mantle</b>") || !strings.Contains(move.Caption, "<b>25 mETH</b>") {
+		t.Errorf("move should render the moved headline:\n%s", move.Caption)
 	}
 
-	// Malformed payload: still a valid alert with the token subject (no panic, no drop).
 	malformed := FormatSignal(store.Signal{
-		SignalType: 4, Pool: "0xmeth", Metric: "lst_flow",
+		SignalType: 4, Pool: "0xcda86a272531e8640cd7f1a92c01839911b90bb0", Metric: "lst_flow",
 		Payload: []byte(`not json`),
-	}, "", "", testScanBase)
-	if !strings.Contains(malformed, "<b>LST moved</b>") || !strings.Contains(malformed, "/address/0xmeth") {
-		t.Errorf("malformed lst-flow payload should still render kind + token subject:\n%s", malformed)
+	}, Context{}, "", testScanBase, testDash)
+	if !strings.Contains(malformed.Caption, "<b>LST moved · Mantle</b>") {
+		t.Errorf("malformed lst-flow should still render the default verb:\n%s", malformed.Caption)
+	}
+	if buttonURL(malformed, "View token") == "" {
+		t.Errorf("malformed lst-flow should still expose the token button:\n%s", malformed.Caption)
+	}
+	if !strings.Contains(malformed.Caption, "<b>Token</b>\n<code>"+malformed.Card.Headline) {
+		// Headline falls back to the short pool address for an unknown symbol; the copy
+		// block must carry the full address.
+		if !strings.Contains(malformed.Caption, "<code>0xcda86a272531e8640cd7f1a92c01839911b90bb0</code>") {
+			t.Errorf("actor-less lst-flow should copy the token address:\n%s", malformed.Caption)
+		}
 	}
 }
 
-// A depeg (type 7) alert renders the DEPEG headline with the stablecoin + bps off peg,
-// the implied price, the depegging token (subject) linked, the at-risk pools (the
-// contagion set, each linked), and the attestation, never a z-score or USD size.
+// A depeg (type 7) shows the implied price, the bps deviation, the exposed pools, and a
+// token copy block, with no z-score wording.
 func TestFormatSignal_Depeg(t *testing.T) {
 	s := store.Signal{
 		SignalType: 7,
-		Pool:       "0xusde", // subject = the depegging token
+		Pool:       "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
 		Metric:     "depeg",
 		Zscore:     4.7,
 		Payload: []byte(`{"token_symbol":"USDe","implied_price":"0.971","deviation_bps":290,` +
 			`"affected_pools":[{"address":"0xpoola","label":"USDC/USDe"},{"address":"0xpoolb","label":"USDT/USDe"}]}`),
 	}
-	out := FormatSignal(s, "", "0xtxdepeg", testScanBase)
+	v := FormatSignal(s, Context{}, "0xtxdepeg", testScanBase, testDash)
+
 	for _, want := range []string{
-		"<b>DEPEG</b>",
-		"USDe 290 bps off $1",
-		"Implied price: 0.971",
-		"Token: ",
-		"/address/0xusde",
-		"At-risk pools (2):",
-		"USDC/USDe",
-		"/address/0xpoola",
-		"USDT/USDe",
-		"/address/0xpoolb",
-		"/tx/0xtxdepeg",
+		"⚠️ <b>Depeg alert · USDe</b>",
+		"USDe trading at <b>$0.971</b>, <b>290 bps below</b> the $1 peg.",
+		"Exposed: USDC/USDe · USDT/USDe.",
+		"<b>Token</b>\n<code>" + s.Pool + "</code>",
 	} {
-		if !strings.Contains(out, want) {
-			t.Errorf("depeg message missing %q:\n%s", want, out)
+		if !strings.Contains(v.Caption, want) {
+			t.Errorf("depeg caption missing %q:\n%s", want, v.Caption)
 		}
 	}
-	// A depeg has no z-score, no smart-money score, and no USD size.
-	for _, banned := range []string{"z=", "Z-score:", "score=", "smart money", "~$"} {
-		if strings.Contains(out, banned) {
-			t.Errorf("depeg message leaked %q:\n%s", banned, out)
+	if got := buttonURL(v, "View token"); got != testScanBase+"/address/"+s.Pool {
+		t.Errorf("depeg token button = %q", got)
+	}
+	if got := buttonURL(v, "On-chain proof"); got != testScanBase+"/tx/0xtxdepeg" {
+		t.Errorf("depeg proof button = %q", got)
+	}
+	if got := buttonURL(v, "Wallet"); got != "" {
+		t.Errorf("depeg has no actor, so no wallet button; got %q", got)
+	}
+
+	c := v.Card
+	if c.Kind != "depeg" || c.Headline != "USDe" {
+		t.Errorf("depeg card kind/headline = %q/%q", c.Kind, c.Headline)
+	}
+	if got := specValue(c, "DEVIATION"); got != "2.9%" {
+		t.Errorf("depeg card deviation spec = %q", got)
+	}
+	if got := specValue(c, "EXPOSED POOLS"); got != "2" {
+		t.Errorf("depeg card exposed spec = %q", got)
+	}
+	noZScoreJargon(t, v.Caption)
+}
+
+// The caption must stay inside the Bot API's 1024 visible-character budget even with an
+// oversized analyst note: the note is clamped, the structure is preserved.
+func TestCaption_BudgetWithLongNote(t *testing.T) {
+	usd := decFromStr("48200")
+	s := store.Signal{
+		SignalType: 2,
+		Pool:       "0xeafc4d6d4c3391cd4fc10c85d2f5f972d58c0dd5",
+		Metric:     "whale_swap",
+		Actor:      "0x8d58a3f1c0b2e7a9d4f6c1b8e2a05d7f3c9b6e10",
+		SizeUSD:    &usd,
+		Payload:    []byte(`{"size0":18000,"median":1000}`),
+		LLMNote:    strings.Repeat("Very long analyst note. ", 100), // ~2400 runes
+	}
+	v := FormatSignal(s, Context{PoolLabel: "USDe/WMNT", Dex: "Agni"}, "0xtx", testScanBase, testDash)
+
+	visible := visibleLen(v.Caption)
+	if visible > 1024 {
+		t.Errorf("caption visible length %d exceeds the 1024 budget", visible)
+	}
+	if !strings.Contains(v.Caption, "…") {
+		t.Error("an over-budget note must be clamped with an ellipsis")
+	}
+	if !strings.Contains(v.Caption, "<code>"+s.Actor+"</code>") {
+		t.Error("the copy block must survive note clamping")
+	}
+}
+
+// visibleLen approximates Telegram's caption accounting: entities do not count, so the
+// HTML tags are stripped and entity-escapes collapse back to one character.
+func visibleLen(html string) int {
+	stripped := html
+	for _, tag := range []string{
+		"<b>", "</b>", "<code>", "</code>",
+		"<blockquote expandable>", "</blockquote>",
+	} {
+		stripped = strings.ReplaceAll(stripped, tag, "")
+	}
+	for entity, ch := range map[string]string{"&amp;": "&", "&lt;": "<", "&gt;": ">"} {
+		stripped = strings.ReplaceAll(stripped, entity, ch)
+	}
+	return len([]rune(stripped))
+}
+
+// Pool labels containing HTML metacharacters must arrive escaped in the caption.
+func TestCaption_EscapesPoolLabel(t *testing.T) {
+	s := store.Signal{SignalType: 1, Pool: "0xpool", Metric: "vol0"}
+	v := FormatSignal(s, Context{PoolLabel: "<evil>&pair"}, "", testScanBase, testDash)
+	if strings.Contains(v.Caption, "<evil>") {
+		t.Errorf("caption leaked an unescaped pool label:\n%s", v.Caption)
+	}
+	if !strings.Contains(v.Caption, "&lt;evil&gt;&amp;pair") {
+		t.Errorf("caption must carry the escaped label:\n%s", v.Caption)
+	}
+}
+
+// humanMultiple rounds to one decimal under 10x and to an integer above, and reports
+// false when there is nothing meaningful to compare against.
+func TestHumanMultiple(t *testing.T) {
+	cases := []struct {
+		latest, median float64
+		want           string
+		ok             bool
+	}{
+		{9120, 1000, "9.1×", true},
+		{18000, 1000, "18×", true},
+		{297000, 1000, "297×", true},
+		{-4000, 1000, "4.0×", true}, // signed metric reads as a positive multiple
+		{500, 1000, "", false},      // below 1x: nothing notable
+		{100, 0, "", false},         // no baseline
+	}
+	for _, c := range cases {
+		got, ok := humanMultiple(c.latest, c.median)
+		if got != c.want || ok != c.ok {
+			t.Errorf("humanMultiple(%g,%g) = (%q,%v), want (%q,%v)", c.latest, c.median, got, ok, c.want, c.ok)
 		}
 	}
 }
 
-// A depeg alert with no contagion renders "none tracked"; a malformed payload still
-// renders a valid alert with the token subject (no panic, no drop).
-func TestFormatSignal_DepegNoContagionAndMalformed(t *testing.T) {
-	none := FormatSignal(store.Signal{
-		SignalType: 7, Pool: "0xusdt", Metric: "depeg",
-		Payload: []byte(`{"token_symbol":"USDT","implied_price":"0.99","deviation_bps":100}`),
-	}, "", "", testScanBase)
-	if !strings.Contains(none, "At-risk pools: none tracked") {
-		t.Errorf("a depeg with no contagion should render 'none tracked':\n%s", none)
+// groupThousands inserts comma separators only past three digits, both signs.
+func TestGroupThousands(t *testing.T) {
+	cases := map[int64]string{
+		0: "0", 7: "7", 100: "100", 1000: "1,000", 48200: "48,200",
+		1000000: "1,000,000", -2500: "-2,500",
 	}
+	for in, want := range cases {
+		if got := groupThousands(in); got != want {
+			t.Errorf("groupThousands(%d) = %q, want %q", in, got, want)
+		}
+	}
+}
 
-	malformed := FormatSignal(store.Signal{
-		SignalType: 7, Pool: "0xusde", Metric: "depeg",
-		Payload: []byte(`not json`),
-	}, "", "", testScanBase)
-	if !strings.Contains(malformed, "<b>DEPEG</b>") || !strings.Contains(malformed, "/address/0xusde") {
-		t.Errorf("malformed depeg payload should still render the headline + token subject:\n%s", malformed)
+// shortAddr abbreviates only addresses longer than the head+tail it keeps.
+func TestShortAddr(t *testing.T) {
+	if got := shortAddr("0x8d58a3f1c0b2e7a9d4f6c1b8e2a05d7f3c9b6e10"); got != "0x8d58…6e10" {
+		t.Errorf("shortAddr long = %q", got)
+	}
+	if got := shortAddr("0xabcd"); got != "0xabcd" {
+		t.Errorf("shortAddr short should pass through, got %q", got)
+	}
+}
+
+// clampRunes keeps short strings intact and cuts long ones at the rune budget with an
+// ellipsis (never mid-rune).
+func TestClampRunes(t *testing.T) {
+	if got := clampRunes("short", 10); got != "short" {
+		t.Errorf("clampRunes short = %q", got)
+	}
+	long := strings.Repeat("×", 20) // multi-byte runes
+	got := clampRunes(long, 10)
+	if r := []rune(got); len(r) != 10 || r[9] != '…' {
+		t.Errorf("clampRunes long = %q (%d runes)", got, len(r))
 	}
 }
