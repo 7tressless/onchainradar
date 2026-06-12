@@ -132,22 +132,6 @@ func (d *DB) PruneRawLogsBefore(ctx context.Context, cutoff time.Time) (int64, e
 	return ct.RowsAffected(), nil
 }
 
-// FreshestRawLogTime returns the newest block_time across raw_logs, or
-// (zero, false, nil) when empty. It is the cheapest freshness signal for the
-// silent-stall watchdog (a block_time lagging wall-clock means ingestion stalled); the
-// block_time index makes it a single MAX probe.
-func (d *DB) FreshestRawLogTime(ctx context.Context) (time.Time, bool, error) {
-	const q = `SELECT MAX(block_time) FROM raw_logs`
-	var ts *time.Time
-	if err := d.Pool.QueryRow(ctx, q).Scan(&ts); err != nil {
-		return time.Time{}, false, fmt.Errorf("store: freshest raw_log time: %w", err)
-	}
-	if ts == nil {
-		return time.Time{}, false, nil
-	}
-	return *ts, true, nil
-}
-
 // GetCursor returns the last fully-processed block for a chain. The bool is
 // false (with a nil error) when no cursor row exists yet.
 func (d *DB) GetCursor(ctx context.Context, chainID int64) (int64, bool, error) {

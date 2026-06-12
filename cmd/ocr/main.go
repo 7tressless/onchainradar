@@ -611,7 +611,7 @@ func detectLoop(ctx context.Context, cfg *config.Config, db *store.DB, client *c
 	depegDet := detect.NewDepegDetector(db, cfg)
 
 	// Telegram is optional: configured only when both token and chat id are set.
-	tg := newTelegram(cfg, "detect: telegram delivery disabled (TG_BOT_TOKEN or TG_CHANNEL_ID unset)")
+	tg := newTelegram(cfg, cfg.TGChannelID, "detect: telegram delivery disabled (TG_BOT_TOKEN or TG_CHANNEL_ID unset)")
 
 	// One-shot modes used after a backfill (each signal still flows through the hot path):
 	//   once   - score only the newest bucket per pool, plus one whale + one smart-money scan.
@@ -996,7 +996,7 @@ func enrichLoop(ctx context.Context, db *store.DB, cfg *config.Config) error {
 
 	// Telegram is optional: the in-alert note edit happens only when it is configured.
 	// Without it, notes still reach the DB / dashboard.
-	tg := newTelegram(cfg, "enrich: telegram edit disabled (TG_BOT_TOKEN or TG_CHANNEL_ID unset); notes go to DB/dashboard only")
+	tg := newTelegram(cfg, cfg.TGChannelID, "enrich: telegram edit disabled (TG_BOT_TOKEN or TG_CHANNEL_ID unset); notes go to DB/dashboard only")
 
 	// Resolve pool labels so the LLM prompt reads "USDC/USDe", not a raw address. The map
 	// is display-only (signalContext falls back to the raw address), so a load failure must
@@ -1408,7 +1408,7 @@ func runOneShotDetector(
 	if err != nil {
 		return fmt.Errorf("%s: %w", label, err)
 	}
-	tg := newTelegram(cfg, label+": telegram delivery disabled (TG_BOT_TOKEN or TG_CHANNEL_ID unset)")
+	tg := newTelegram(cfg, cfg.TGChannelID, label+": telegram delivery disabled (TG_BOT_TOKEN or TG_CHANNEL_ID unset)")
 
 	signals, err := build(db, cfg, client).ScanOnce(ctx)
 	if err != nil {
@@ -1746,17 +1746,26 @@ func outcomePass(ctx context.Context, db *store.DB, cfg *config.Config, attestor
 	}
 }
 
-// watchdogLoop is the supervisor's silent-stall watchdog stage. Every
-// watchdogInterval it reads the freshest ingested activity (MAX raw_logs.block_time)
-// and, when that lags wall-clock by more than StallAlertMin minutes, emits one
-// throttled WARN log and, when Telegram is configured, one throttled alert, so a
-// stalled collector or a wedged RPC surfaces instead of stalling silently. The
-// hot loops already log "scan failed, will retry"; this catches the subtler case
-// where every stage is "fine" yet no new data is arriving.
+// watchdogState carries the silent-stall watchdog's progress across ticks: the last
+// collector cursor it observed, when that cursor last advanced, and when it last alerted.
+type watchdogState struct {
+	lastBlock  int64
+	advancedAt time.Time
+	lastAlert  time.Time
+}
+
+// watchdogLoop is the supervisor's silent-stall watchdog stage. Every watchdogInterval it
+// reads the collector cursor (the last block the collector processed); when that cursor
+// stops advancing for more than StallAlertMin minutes it emits a throttled WARN and, when
+// an alert chat is configured, a throttled Telegram alert. The cursor advances on every
+// scan that covers new blocks regardless of whether the tracked pools traded, so a frozen
+// cursor means a real stall — a wedged collector or a down RPC — not a quiet market. The
+// hot loops already log "scan failed, will retry"; this catches the subtler case where
+// every stage looks "fine" yet ingestion has silently stopped.
 //
-// It self-disables when STALL_ALERT_MIN <= 0. It is best-effort and never fatal: a
-// freshness-query failure is logged and the loop continues; only ctx cancellation
-// ends it. The re-alert throttle policy lives in stallAlertDecision.
+// It self-disables when STALL_ALERT_MIN <= 0. It is best-effort and never fatal: a cursor
+// read failure is logged and the loop continues; only ctx cancellation ends it. The pure
+// liveness + throttle logic lives in watchdogStep.
 func watchdogLoop(ctx context.Context, db *store.DB, cfg *config.Config) error {
 	if cfg.StallAlertMin <= 0 {
 		log.Info().Msg("watchdog: disabled (STALL_ALERT_MIN <= 0)")
@@ -1764,9 +1773,9 @@ func watchdogLoop(ctx context.Context, db *store.DB, cfg *config.Config) error {
 	}
 	threshold := time.Duration(cfg.StallAlertMin) * time.Minute
 
-	// Telegram is optional: only when configured do stall alerts reach the channel.
-	// Without it the WARN log still fires.
-	tg := newTelegram(cfg, "watchdog: telegram alerting disabled (TG_BOT_TOKEN or TG_CHANNEL_ID unset); stalls log only")
+	// Operational alerts go to a private operator chat, never the public signal channel;
+	// unset leaves stalls in the WARN log only.
+	tg := newTelegram(cfg, cfg.TGAlertChatID, "watchdog: telegram alerting disabled (TG_ALERT_CHAT_ID unset); stalls log only")
 
 	ticker := time.NewTicker(watchdogInterval)
 	defer ticker.Stop()
@@ -1774,79 +1783,92 @@ func watchdogLoop(ctx context.Context, db *store.DB, cfg *config.Config) error {
 	log.Info().Dur("interval", watchdogInterval).Dur("threshold", threshold).
 		Msg("watchdog: silent-stall loop started")
 
-	// lastAlert is the zero time until the first stall alert fires; reset to zero
-	// whenever freshness recovers, so the next distinct stall alerts immediately.
-	var lastAlert time.Time
+	var st watchdogState
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			lastAlert = watchdogCheck(ctx, db, tg, threshold, lastAlert)
+			st = watchdogCheck(ctx, db, cfg.ChainID, tg, threshold, st)
 		}
 	}
 }
 
-// watchdogCheck runs one freshness probe and returns the (possibly updated) last-alert
-// timestamp the caller threads back in next tick. It reads the freshest raw_logs
-// block_time and defers the alert/throttle call to stallAlertDecision; on a stall it
-// WARNs and (when tg != nil) TG-alerts. It never returns an error: a query failure is
-// logged and treated as "cannot assess", not a stall.
-func watchdogCheck(ctx context.Context, db *store.DB, tg *deliver.Telegram, threshold time.Duration, lastAlert time.Time) time.Time {
-	freshest, ok, err := db.FreshestRawLogTime(ctx)
+// watchdogCheck runs one liveness probe and returns the next watchdog state. It reads the
+// collector cursor and defers the liveness + throttle decision to watchdogStep; on a stall
+// it WARNs and (when tg != nil) TG-alerts. It never returns an error: a cursor read failure
+// or a not-yet-seeded cursor is treated as "cannot assess" and leaves the state intact.
+func watchdogCheck(ctx context.Context, db *store.DB, chainID int64, tg *deliver.Telegram, threshold time.Duration, st watchdogState) watchdogState {
+	cursor, ok, err := db.GetCursor(ctx, chainID)
 	if err != nil {
 		if ctx.Err() != nil {
-			return lastAlert
+			return st
 		}
-		// Cannot read freshness: log and leave the throttle state untouched so a
-		// transient DB blip neither fires a false stall alert nor resets a real one.
-		log.Error().Err(err).Msg("watchdog: freshness query failed, will retry next tick")
-		return lastAlert
+		// Cannot read the cursor: leave state untouched so a transient DB blip neither
+		// fires a false stall alert nor resets a real one.
+		log.Error().Err(err).Msg("watchdog: cursor read failed, will retry next tick")
+		return st
 	}
 
-	alert, newLast := stallAlertDecision(freshest, ok, time.Now(), threshold, lastAlert)
+	now := time.Now()
+	next, alert := watchdogStep(st, cursor, ok, now, threshold)
 	if !alert {
-		return newLast
+		return next
 	}
 
-	lag := time.Since(freshest)
+	frozen := now.Sub(st.advancedAt)
 	log.Warn().
-		Time("freshest_block_time", freshest).
-		Dur("lag", lag.Round(time.Second)).
+		Int64("cursor_block", cursor).
+		Dur("frozen_for", frozen.Round(time.Second)).
 		Dur("threshold", threshold).
-		Msg("watchdog: ingestion appears stalled (no fresh on-chain activity)")
+		Msg("watchdog: collector cursor not advancing (ingestion stalled)")
 
 	if tg != nil {
 		msg := fmt.Sprintf(
-			"OCR watchdog: ingestion stalled. Freshest on-chain activity is %s old (threshold %s). Check the collector / RPC.",
-			lag.Round(time.Second), threshold)
-		// Bound the send so a black-holing Telegram endpoint cannot stall the
-		// watchdog tick; a failure is logged, never fatal.
+			"OCR watchdog: ingestion stalled. Collector cursor stuck at block %d for %s (threshold %s). Check the collector / RPC.",
+			cursor, frozen.Round(time.Second), threshold)
+		// Bound the send so a black-holing Telegram endpoint cannot stall the watchdog
+		// tick; a failure is logged, never fatal.
 		sctx, scancel := context.WithTimeout(ctx, deliverTimeout)
 		if _, serr := tg.Send(sctx, msg, nil); serr != nil {
 			log.Error().Err(serr).Msg("watchdog: stall telegram alert failed")
 		}
 		scancel()
 	}
-	return newLast
+	return next
 }
 
-// stallAlertDecision is the pure throttle policy behind the watchdog, split out so
-// it is unit-testable without a DB or clock. Given the freshest activity time (and
-// whether any exists), the current time, the stall threshold, and the last time an
-// alert fired, it returns whether to alert now and the last-alert timestamp to carry
-// forward:
+// watchdogStep is the pure state transition for one watchdog tick, split out so the
+// liveness + throttle logic is unit-testable without a DB, clock, or Telegram. Given the
+// prior state, the freshly-read cursor (and whether one exists yet), the current time, and
+// the stall threshold, it returns the next state and whether to alert now:
 //
-//   - no data yet (hasData=false): not a stall; arm the throttle (zero time).
-//   - lag <= threshold (healthy): clear the throttle so the next distinct stall
-//     alerts immediately.
-//   - lag > threshold (stalled): alert on the first crossing, then at most once per
-//     stallReAlertInterval; while suppressed, carry the existing lastAlert forward.
-func stallAlertDecision(freshest time.Time, hasData bool, now time.Time, threshold time.Duration, lastAlert time.Time) (alert bool, newLast time.Time) {
-	if !hasData {
-		return false, time.Time{}
+//   - no cursor yet (cold start): cannot assess; carry state forward, no alert.
+//   - cursor advanced (or first observation): the collector is progressing; record the new
+//     block and advance time and clear the throttle.
+//   - cursor unchanged: a candidate stall; defer to stallAlertDecision for the threshold
+//     crossing and re-alert throttle.
+func watchdogStep(st watchdogState, cursor int64, hasCursor bool, now time.Time, threshold time.Duration) (next watchdogState, alert bool) {
+	if !hasCursor {
+		return st, false
 	}
-	if now.Sub(freshest) <= threshold {
+	if st.advancedAt.IsZero() || cursor > st.lastBlock {
+		return watchdogState{lastBlock: cursor, advancedAt: now}, false
+	}
+	doAlert, newLast := stallAlertDecision(now.Sub(st.advancedAt), threshold, now, st.lastAlert)
+	return watchdogState{lastBlock: st.lastBlock, advancedAt: st.advancedAt, lastAlert: newLast}, doAlert
+}
+
+// stallAlertDecision is the watchdog's throttle policy: given how long the collector
+// cursor has been frozen, the stall threshold, the current time, and when an alert last
+// fired, it returns whether to alert now and the last-alert timestamp to carry forward.
+//
+//   - frozen <= threshold (healthy): no alert; clear the throttle so the next distinct
+//     stall alerts immediately.
+//   - frozen > threshold (stalled): alert on the first crossing, then at most once per
+//     stallReAlertInterval; while suppressed, carry the existing lastAlert forward.
+func stallAlertDecision(frozen, threshold time.Duration, now, lastAlert time.Time) (alert bool, newLast time.Time) {
+	if frozen <= threshold {
 		return false, time.Time{}
 	}
 	if !lastAlert.IsZero() && now.Sub(lastAlert) < stallReAlertInterval {
@@ -1855,17 +1877,17 @@ func stallAlertDecision(freshest time.Time, hasData bool, now time.Time, thresho
 	return true, now
 }
 
-// newTelegram builds the optional Telegram client used by every stage that alerts.
-// Configured only when both the bot token and channel id are set; otherwise it logs
+// newTelegram builds the optional Telegram client for an explicit destination chat.
+// Configured only when both the bot token and chatID are set; otherwise it logs
 // disabledMsg once and returns nil, which callers pass straight through (Dispatch and
-// the edit/send paths all no-op on a nil client). disabledMsg is per-stage so each
-// keeps its own context (delivery vs note-edit vs stall-alert) in the log.
-func newTelegram(cfg *config.Config, disabledMsg string) *deliver.Telegram {
-	if cfg.TGBotToken == "" || cfg.TGChannelID == "" {
+// the edit/send paths all no-op on a nil client). Passing the chat per call keeps each
+// destination obvious: signals go to the public channel, ops alerts to a private chat.
+func newTelegram(cfg *config.Config, chatID, disabledMsg string) *deliver.Telegram {
+	if cfg.TGBotToken == "" || chatID == "" {
 		log.Warn().Msg(disabledMsg)
 		return nil
 	}
-	return deliver.NewTelegram(cfg.TGBotToken, cfg.TGChannelID)
+	return deliver.NewTelegram(cfg.TGBotToken, chatID)
 }
 
 // newSignalAttestor builds the optional on-chain signal attestor. It returns

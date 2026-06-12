@@ -29,7 +29,11 @@ type Config struct {
 
 	// Telegram
 	TGBotToken  string
-	TGChannelID string
+	TGChannelID string // public signal channel
+	// TGAlertChatID is a private operator chat for operational alerts (watchdog stalls),
+	// kept separate from the public signal channel. Empty disables those alerts (logged
+	// only); they are never posted to TGChannelID.
+	TGAlertChatID string
 
 	// Attestation. The agent wallet holds gas only.
 	AgentPrivateKey string
@@ -194,6 +198,7 @@ func Load() (*Config, error) {
 		DatabaseURL:            os.Getenv("DATABASE_URL"),
 		TGBotToken:             os.Getenv("TG_BOT_TOKEN"),
 		TGChannelID:            os.Getenv("TG_CHANNEL_ID"),
+		TGAlertChatID:          os.Getenv("TG_ALERT_CHAT_ID"),
 		AgentPrivateKey:        os.Getenv("AGENT_PRIVATE_KEY"),
 		AttestorAddress:        os.Getenv("ATTESTOR_ADDRESS"),
 		OutcomeAttestorAddress: os.Getenv("OUTCOME_ATTESTOR_ADDRESS"),
