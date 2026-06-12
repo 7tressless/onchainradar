@@ -118,7 +118,7 @@ export interface Stats {
     big_borrow?: number;
     depeg?: number;
     top_actor: string | null;
-    // 24h outcome breakdown: present once enough signals are graded in-window.
+    // 24h outcome breakdown (populated once enough signals are graded).
     grade_distribution?: GradeDistribution;
     avg_grade?: number;
     outcomes_total?: number;

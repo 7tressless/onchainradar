@@ -89,7 +89,7 @@ export function Dashboard() {
   const stats = useStats();
   const live = useLiveFeed(); // real SSE stream (the "live" feed)
   const sig = useSignals(100); // polled list (feed history + hero fallback)
-  const graded = useSignals(50, true); // graded-only, server-filtered (?graded=true) for the track record
+  const graded = useSignals(50, true); // graded-only list for the track record (?graded=true)
   const actors = useActors(50);
   const pools = usePools();
   const { signals: chainSignals, newIds: chainNewIds } = useChainSignals();
@@ -130,9 +130,8 @@ export function Dashboard() {
   }, [feedSignals]);
   // Active stablecoin depeg (rare) → the global risk banner.
   const depeg = useMemo(() => feedSignals.find((s) => s.type === 7), [feedSignals]);
-  // Track record = the graded, on-chain calls. Prefer the server-filtered ?graded=true
-  // list; if it's empty (backend without the param yet) fall back to filtering the full
-  // polled list by outcome, so the panel never goes blank.
+  // Track record = graded, on-chain calls. Prefer the server ?graded=true list; if it's
+  // empty, fall back to filtering the full polled list by outcome.
   const gradedSignals = useMemo(() => {
     const server = (graded.data?.items ?? []).filter((s) => s.outcome);
     return server.length ? server : recordSignals.filter((s) => s.outcome);

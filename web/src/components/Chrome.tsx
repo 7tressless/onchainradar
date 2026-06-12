@@ -1,5 +1,6 @@
 "use client";
 
+import { Send } from "lucide-react";
 import { useBlockNumber } from "@/lib/hooks";
 
 const SIGNAL_ATTESTOR = "0x7bD664AdfB091E5159fE1CBfa01bFD6f2734A968";
@@ -54,12 +55,24 @@ export function Chrome({ count }: { count?: number }) {
         <span>
           <span className="text-ink">{count != null ? count : "—"}</span> attest
         </span>
-        <span className="text-line">/</span>
-        <a data-cursor href={`${SCAN}/${SIGNAL_ATTESTOR}`} target="_blank" rel="noopener noreferrer" className="hover:text-ink">
+        <span className="hidden text-line sm:inline">/</span>
+        <a data-cursor href={`${SCAN}/${SIGNAL_ATTESTOR}`} target="_blank" rel="noopener noreferrer" className="hidden hover:text-ink sm:inline">
           calls↗
         </a>
-        <a data-cursor href={`${SCAN}/${OUTCOME_ATTESTOR}`} target="_blank" rel="noopener noreferrer" className="hover:text-ink">
+        <a data-cursor href={`${SCAN}/${OUTCOME_ATTESTOR}`} target="_blank" rel="noopener noreferrer" className="hidden hover:text-ink sm:inline">
           outcomes↗
+        </a>
+        <a
+          data-cursor
+          href="https://t.me/OCRalert"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="OCR Telegram"
+          className="flex items-center gap-1 transition-colors hover:opacity-70"
+          style={{ color: "var(--color-accent)" }}
+        >
+          <Send size={12} className="flex-shrink-0" />
+          <span className="hidden sm:inline">telegram↗</span>
         </a>
       </div>
     </header>
