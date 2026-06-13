@@ -9,6 +9,7 @@ Built for the Mantle Turing Test Hackathon, Track 02 (AI Alpha & Data).
 ## See it live
 
 - **Dashboard** (public, no wallet, no login): https://onchainradar.tech
+- **Telegram channel** (live photo-card alerts): https://t.me/OCRalert
 - **On-chain record**: `SignalAttestor` on Mantle mainnet `0x7bD664AdfB091E5159fE1CBfa01bFD6f2734A968`, every signal a `SignalAttested` log on [MantleScan](https://mantlescan.xyz/address/0x7bD664AdfB091E5159fE1CBfa01bFD6f2734A968)
 
 ## Why it matters
@@ -48,7 +49,7 @@ One Go binary (`ocr`) and Postgres. No Redis, no queues, no other infrastructure
 - **detect** scores each pool against its own baseline and emits the signals above.
 - **enrich** runs off the hot path: one structured LLM call per signal writes a short analyst note. LLM downtime never blocks detection or attestation.
 - **attest** hashes the canonical signal JSON and sends the on-chain attestation, storing the tx hash on the signal row.
-- **deliver** pushes each signal to Telegram with explorer links; the note is edited into the same message once ready.
+- **deliver** posts each signal to Telegram as a branded photo-card with a plain-language caption (key numbers in bold, never a raw z-score) and a row of inline links (on-chain proof, pool, wallet, dashboard); the analyst note is edited into the caption once enrich completes.
 - **outcome** grades each matured call into a reproducible, hashable report card, optionally committed on-chain.
 
 ## On-chain attestation
@@ -104,7 +105,7 @@ internal/
   detect/       MAD z-score engine + the seven detector families
   attest/       signal hashing + attestation transactions
   enrich/       LLM analyst note (provider interface)
-  deliver/      Telegram client + dispatcher
+  deliver/      Telegram client + dispatcher + photo-card renderer
   outcome/      matured-signal grading + report-card hashing
   discover/     on-chain-verified pool discovery
   poolstats/    display-only external market snapshot
