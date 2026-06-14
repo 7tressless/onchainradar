@@ -470,6 +470,29 @@ func (d *DB) BucketsBetween(ctx context.Context, pool string, from, to time.Time
 	return scanBuckets(rows)
 }
 
+// SumBucketVolumeSince returns a pool's gross swap volume per token (vol0, vol1) summed
+// over buckets at or after `since`, in raw token units. It backs the display-only
+// on-chain USD volume in the market snapshot (the caller values the stable side at $1),
+// computed from our own aggregated buckets instead of a third-party feed. An empty window
+// sums to (0, 0); the NUMERIC(78) sums come back ::text for full precision.
+func (d *DB) SumBucketVolumeSince(ctx context.Context, pool string, since time.Time) (vol0, vol1 decimal.Decimal, err error) {
+	const q = `
+		SELECT COALESCE(SUM(vol0), 0)::text, COALESCE(SUM(vol1), 0)::text
+		FROM buckets
+		WHERE pool = $1 AND ts_bucket >= $2`
+	var v0, v1 string
+	if err := d.Pool.QueryRow(ctx, q, strings.ToLower(pool), since.UTC()).Scan(&v0, &v1); err != nil {
+		return decimal.Zero, decimal.Zero, fmt.Errorf("store: sum bucket volume pool=%s: %w", strings.ToLower(pool), err)
+	}
+	if vol0, err = decimal.NewFromString(v0); err != nil {
+		return decimal.Zero, decimal.Zero, fmt.Errorf("store: parse vol0 sum %q: %w", v0, err)
+	}
+	if vol1, err = decimal.NewFromString(v1); err != nil {
+		return decimal.Zero, decimal.Zero, fmt.Errorf("store: parse vol1 sum %q: %w", v1, err)
+	}
+	return vol0, vol1, nil
+}
+
 // LastBucketTime returns the newest ts_bucket for a pool. The bool is false
 // (with a nil error) when the pool has no buckets yet.
 func (d *DB) LastBucketTime(ctx context.Context, pool string) (time.Time, bool, error) {

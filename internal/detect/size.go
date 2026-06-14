@@ -6,6 +6,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"ocr/internal/store"
+	"ocr/internal/tokens"
 )
 
 // This file derives the display-only approximate USD size of a signal from our own
@@ -13,28 +14,12 @@ import (
 // dashboard only; detection, scoring, and baselines never read it, so the caller-
 // supplied market price never moves a detection decision.
 
-// stableTokens is the set of known Mantle stablecoins whose on-chain amount is
-// treated as one dollar per whole token for the display-only size_usd. Verified
-// registry addresses from config/pools.yaml (lowercase hex), not invented here:
-//
-//	USDe 0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34
-//	USDC 0x09bc4e0d864854c6afb6eb9a9cdf58ac190d0df9
-//	USDT 0x201eba5cc46d216ce6dc03f6a759e8e766e956ae
-//
-// Membership is by contract address (not symbol), so a relabelled pool cannot
-// misclassify a token. Per-pool decimals (pools.dec0/dec1) stay authoritative for
-// scaling.
-var stableTokens = map[string]struct{}{
-	"0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34": {}, // USDe
-	"0x09bc4e0d864854c6afb6eb9a9cdf58ac190d0df9": {}, // USDC
-	"0x201eba5cc46d216ce6dc03f6a759e8e766e956ae": {}, // USDT
-}
-
-// isStableToken reports whether a token contract address is a known stablecoin in
-// the verified set above (case-insensitive; trims surrounding space).
+// isStableToken reports whether a token address is a verified Mantle dollar stable
+// (USDe/USDC/USDT), valued at $1 per whole token for the display-only size_usd. The
+// verified set lives in internal/tokens (single source of truth); per-pool decimals
+// (pools.dec0/dec1) stay authoritative for scaling.
 func isStableToken(addr string) bool {
-	_, ok := stableTokens[strings.ToLower(strings.TrimSpace(addr))]
-	return ok
+	return tokens.IsStable(addr)
 }
 
 // stableSizeUSD computes the display-only approximate USD notional of one swap from

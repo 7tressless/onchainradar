@@ -40,8 +40,17 @@ var (
 	// selGetTokenY = getTokenY() -> address  (Liquidity Book, e.g. Merchant Moe).
 	selGetTokenY = selector("getTokenY()")
 	// selGetBinStep = getBinStep() -> uint16  (Liquidity Book, e.g. Merchant Moe): the
-	// pool's bin step (= 0x17f11ecc). Used only for the API's add-liquidity deep-link.
+	// pool's bin step (= 0x17f11ecc). Used for the API's add-liquidity deep-link and the
+	// LB spot price.
 	selGetBinStep = selector("getBinStep()")
+	// selGetActiveId = getActiveId() -> uint24  (Liquidity Book): the active bin, which
+	// with the bin step gives the LB pool's spot price (the LB analogue of slot0).
+	selGetActiveId = selector("getActiveId()")
+	// selSlot0 = slot0() -> (uint160 sqrtPriceX96, ...)  (Uniswap-V3-shape pools, e.g.
+	// Agni). The first returned word is sqrtPriceX96; the trailing words are ignored.
+	selSlot0 = selector("slot0()")
+	// selBalanceOf = balanceOf(address) -> uint256  (ERC20). Takes one address argument.
+	selBalanceOf = selector("balanceOf(address)")
 )
 
 // selector returns the 4-byte function selector for an ABI signature string (the first
@@ -116,12 +125,13 @@ func (c *Client) TxSender(ctx context.Context, txHash common.Hash) (common.Addre
 	return from, nil
 }
 
-// callReturnWord executes an eth_call to `to` with a nullary 4-byte selector at the
-// latest block and returns the first 32-byte ABI word. It is the shared primitive
-// behind TokenDecimals and PoolTokens; hand-rolled (not abi.Pack/Unpack) because the
-// calls are nullary and return one word, so a full ABI round-trip buys nothing.
-func (c *Client) callReturnWord(ctx context.Context, to common.Address, sel []byte) ([]byte, error) {
-	out, err := c.eth.CallContract(ctx, ethereum.CallMsg{To: &to, Data: sel}, nil)
+// callReturnWordAt executes an eth_call to `to` with a nullary 4-byte selector at the
+// given block (nil = latest) and returns the first 32-byte ABI word. Hand-rolled (not
+// abi.Pack/Unpack) because the calls are nullary and return one word, so a full ABI
+// round-trip buys nothing. A historical block (served by an archive RPC) backs the 24h
+// price-change read.
+func (c *Client) callReturnWordAt(ctx context.Context, to common.Address, sel []byte, block *big.Int) ([]byte, error) {
+	out, err := c.eth.CallContract(ctx, ethereum.CallMsg{To: &to, Data: sel}, block)
 	if err != nil {
 		return nil, fmt.Errorf("chain: eth_call %s sel=0x%x: %w", to.Hex(), sel, err)
 	}
@@ -132,6 +142,12 @@ func (c *Client) callReturnWord(ctx context.Context, to common.Address, sel []by
 			to.Hex(), sel, len(out))
 	}
 	return out[:32], nil
+}
+
+// callReturnWord is callReturnWordAt at the latest block, the primitive behind
+// TokenDecimals, PoolTokens, and PoolBinStep.
+func (c *Client) callReturnWord(ctx context.Context, to common.Address, sel []byte) ([]byte, error) {
+	return c.callReturnWordAt(ctx, to, sel, nil)
 }
 
 // TokenDecimals returns an ERC20 token's decimals() via eth_call. A value above 255 is
@@ -196,6 +212,69 @@ func (c *Client) PoolBinStep(ctx context.Context, pool common.Address) (uint16, 
 		return 0, fmt.Errorf("chain: bin step %s out of uint16 range: %s", pool.Hex(), n.String())
 	}
 	return uint16(n.Uint64()), nil
+}
+
+// TokenBalance returns an ERC20 token's balanceOf(holder) via eth_call, as a raw amount
+// in the token's smallest unit. A pool's own token balance is its reserve, so this is the
+// reserves read for the display-only market snapshot, uniform across Agni (V3) and
+// Merchant Moe (Liquidity Book) pools, which both custody their reserves in the contract.
+// A short return (not a token, or no such function) is an error so the caller leaves the
+// figure unknown rather than reading a spurious 0.
+func (c *Client) TokenBalance(ctx context.Context, token, holder common.Address) (*big.Int, error) {
+	// Fresh backing array: selBalanceOf is a shared package var, so appending to a copy
+	// avoids mutating it under concurrent callers.
+	data := append(append([]byte{}, selBalanceOf...), common.LeftPadBytes(holder.Bytes(), 32)...)
+	out, err := c.eth.CallContract(ctx, ethereum.CallMsg{To: &token, Data: data}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("chain: balanceOf %s holder=%s: %w", token.Hex(), holder.Hex(), err)
+	}
+	if len(out) < 32 {
+		return nil, fmt.Errorf("chain: balanceOf %s returned %d bytes, want >= 32", token.Hex(), len(out))
+	}
+	return new(big.Int).SetBytes(out[:32]), nil
+}
+
+// PoolSqrtPriceX96At returns a Uniswap-V3-shape pool's sqrtPriceX96 (slot0's first word)
+// at the given block (nil = latest) via eth_call: the pool's exact on-chain spot price as
+// sqrt(token1/token0) in Q64.96. The caller squares and decimal-adjusts it to a human
+// price. Only V3-shape pools (Agni) implement slot0(); a Liquidity Book pool does not, so
+// the call errors and the caller derives that token's price from a V3 pool instead. A
+// historical block (served by the archive RPC) backs the display 24h price change.
+func (c *Client) PoolSqrtPriceX96At(ctx context.Context, pool common.Address, block *big.Int) (*big.Int, error) {
+	word, err := c.callReturnWordAt(ctx, pool, selSlot0, block)
+	if err != nil {
+		return nil, fmt.Errorf("chain: slot0 %s: %w", pool.Hex(), err)
+	}
+	return new(big.Int).SetBytes(word), nil
+}
+
+// maxBinID bounds a Liquidity Book getActiveId() return (uint24); a wider value is a
+// malformed read and is rejected rather than truncated into a plausible bin.
+const maxBinID = 1<<24 - 1
+
+// PoolActiveBinAt returns a Liquidity Book pool's active bin id and bin step at the given
+// block (nil = latest) via eth_call (getActiveId + getBinStep): together they give the
+// pool's spot price as (1 + binStep/1e4)^(activeId - 2^23), the LB analogue of slot0. Only
+// LB pools (Merchant Moe) implement these; an Agni pool does not, so the call errors and
+// the caller prices that token from a V3 pool instead. Out-of-range returns are rejected.
+func (c *Client) PoolActiveBinAt(ctx context.Context, pool common.Address, block *big.Int) (activeID uint32, binStep uint16, err error) {
+	aidWord, err := c.callReturnWordAt(ctx, pool, selGetActiveId, block)
+	if err != nil {
+		return 0, 0, fmt.Errorf("chain: getActiveId %s: %w", pool.Hex(), err)
+	}
+	aid := new(big.Int).SetBytes(aidWord)
+	if !aid.IsUint64() || aid.Uint64() > maxBinID {
+		return 0, 0, fmt.Errorf("chain: getActiveId %s out of uint24 range: %s", pool.Hex(), aid.String())
+	}
+	bsWord, err := c.callReturnWordAt(ctx, pool, selGetBinStep, block)
+	if err != nil {
+		return 0, 0, fmt.Errorf("chain: getBinStep %s: %w", pool.Hex(), err)
+	}
+	bs := new(big.Int).SetBytes(bsWord)
+	if !bs.IsUint64() || bs.Uint64() > 65535 {
+		return 0, 0, fmt.Errorf("chain: getBinStep %s out of uint16 range: %s", pool.Hex(), bs.String())
+	}
+	return uint32(aid.Uint64()), uint16(bs.Uint64()), nil
 }
 
 // LatestBlock returns the most recent block number known to the RPC endpoint.

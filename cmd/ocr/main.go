@@ -38,6 +38,7 @@ import (
 	"ocr/internal/detect"
 	"ocr/internal/discover"
 	"ocr/internal/enrich"
+	"ocr/internal/marketdata"
 	"ocr/internal/outcome"
 	"ocr/internal/poolstats"
 	"ocr/internal/store"
@@ -426,10 +427,9 @@ func runServe(ctx context.Context) error {
 	return nil
 }
 
-// runPoolStats refreshes the external pool market stats for every enabled pool
-// once (best-effort, spaced for the keyless rate limit), then exits. It is the
-// one-shot twin of the supervisor's poolstats stage. The data is for display only
-// and never feeds detection.
+// runPoolStats refreshes the on-chain market snapshot (TVL, 24h volume, spot price) for
+// every enabled pool once, then exits. It is the one-shot twin of the supervisor's
+// poolstats stage. The data is for display only and never feeds detection.
 func runPoolStats(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -442,9 +442,16 @@ func runPoolStats(ctx context.Context) error {
 	}
 	defer db.Close()
 
-	// RunOnce does a single pass regardless of the configured interval, so the
-	// command is useful even when the supervisor stage is disabled.
-	stage := poolstats.New(db, discover.NewGecko(cfg.GeckoAPIKey), time.Duration(cfg.PoolStatsIntervalMin)*time.Minute)
+	client, err := chain.Dial(ctx, cfg.RPCURL, cfg.ChainID)
+	if err != nil {
+		return fmt.Errorf("poolstats: dial chain: %w", err)
+	}
+	defer client.Close()
+
+	// RunOnce does a single pass regardless of the configured interval, so the command is
+	// useful even when the supervisor stage is disabled. The reader reads reserves/price
+	// on-chain and 24h volume from OCR's own buckets (db).
+	stage := poolstats.New(db, marketdata.NewReader(client, db), time.Duration(cfg.PoolStatsIntervalMin)*time.Minute)
 	if err := stage.RunOnce(ctx); err != nil {
 		return fmt.Errorf("poolstats: run once: %w", err)
 	}
@@ -529,9 +536,10 @@ func runSupervisor(parent context.Context) error {
 			return outcomeLoop(c, db, cfg, outcomeAttestor)
 		}},
 		{"poolstats", func(c context.Context) error {
-			// External market stats for display; never feeds detection.
-			// Self-disables when POOL_STATS_INTERVAL_MIN <= 0.
-			return poolstats.New(db, discover.NewGecko(cfg.GeckoAPIKey),
+			// Display-only market stats sourced on-chain (reserves/price) + OCR's own
+			// buckets (24h volume); never feeds detection. Self-disables when
+			// POOL_STATS_INTERVAL_MIN <= 0.
+			return poolstats.New(db, marketdata.NewReader(client, db),
 				time.Duration(cfg.PoolStatsIntervalMin)*time.Minute).Run(c)
 		}},
 		{"watchdog", func(c context.Context) error {
@@ -1618,15 +1626,16 @@ func runDiscover(ctx context.Context) error {
 	return nil
 }
 
-// runPoolMeta backfills each enabled Merchant Moe (Liquidity Book) pool's on-chain
-// bin step (getBinStep(), selector 0x17f11ecc) into pools.bin_step, then exits. It is
-// the twin of the bin-step read `ocr discover` does for new moe pools, covering the
-// existing enabled moe pools (those in the registry before column 0012). bin_step is
-// plumbing for the API's add-liquidity deep-link and is never read by detection.
+// runPoolMeta backfills each enabled pool's static display metadata, then exits: the
+// Merchant Moe (Liquidity Book) bin step (getBinStep(), selector 0x17f11ecc) into
+// pools.bin_step, and each pool's token symbols/logos/decimals from GeckoTerminal into
+// token_meta. Both are static (they change only when the registry changes), plumbing for
+// the API's add-liquidity deep-link and token icons, never read by detection — so they
+// live in this operator-run backfill rather than the frequent on-chain poolstats loop.
 //
 // A pool whose getBinStep() reverts (a non-LB moe pool or a transient RPC error) is
-// logged and skipped (stays NULL) so one bad pool never aborts the run. The read is
-// always re-derived (not gated on bin_step IS NULL), so the backfill is idempotent.
+// logged and skipped (stays NULL) so one bad pool never aborts the run. The reads are
+// always re-derived (not gated on a NULL column), so the backfill is idempotent.
 func runPoolMeta(ctx context.Context) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -1686,6 +1695,11 @@ func runPoolMeta(ctx context.Context) error {
 			Msg("poolmeta: bin step backfilled")
 	}
 
+	// Static token metadata (symbols/logos/decimals) from GeckoTerminal, keyed by address.
+	// Kept off the frequent poolstats loop (which is now fully on-chain); refreshed here so
+	// a newly-added pool's token icons land when the operator runs poolmeta.
+	backfillTokenMeta(ctx, db, discover.NewGecko(cfg.GeckoAPIKey), pools)
+
 	log.Info().
 		Int("enabled", len(pools)).
 		Int("updated", updated).
@@ -1693,6 +1707,62 @@ func runPoolMeta(ctx context.Context) error {
 		Int("failed", failed).
 		Msg("ocr: poolmeta one-shot complete")
 	return nil
+}
+
+// tokenMetaSpacing spaces the per-pool GeckoTerminal calls in the token-meta backfill for
+// the keyless rate limit (~30/min), matching the discovery client's page spacing.
+const tokenMetaSpacing = 2 * time.Second
+
+// backfillTokenMeta refreshes each pool's display-only token metadata (symbol, logo,
+// decimals) from GeckoTerminal into token_meta, keyed by token address. Best-effort: a
+// per-pool fetch or per-token upsert failure is logged and skipped, never aborting the run
+// — token_meta is purely cosmetic (the API falls back to the pool label for symbols and to
+// no icon for logos). Calls are spaced for the keyless rate limit; ctx cancellation stops
+// it promptly.
+func backfillTokenMeta(ctx context.Context, db *store.DB, gecko *discover.Gecko, pools []store.Pool) {
+	upserted := 0
+	for i := range pools {
+		if ctx.Err() != nil {
+			return
+		}
+		ms, err := gecko.PoolStats(ctx, pools[i].Address)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Warn().Err(err).Str("pool", pools[i].Address).Msg("poolmeta: token metadata fetch failed; skipping pool")
+		} else {
+			for _, tok := range ms.Tokens {
+				if tok.Address == "" {
+					continue
+				}
+				if uerr := db.UpsertTokenMeta(ctx, store.TokenMeta{
+					Address:   tok.Address,
+					Symbol:    tok.Symbol,
+					LogoURL:   tok.LogoURL,
+					Decimals:  tok.Decimals,
+					FetchedAt: time.Now().UTC(),
+					SourceURL: ms.SourceURL,
+				}); uerr != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					log.Warn().Err(uerr).Str("token", tok.Address).Msg("poolmeta: token_meta upsert failed; skipping token")
+					continue
+				}
+				upserted++
+			}
+		}
+		// Space calls for the keyless rate limit, skipping the sleep after the final pool.
+		if i < len(pools)-1 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(tokenMetaSpacing):
+			}
+		}
+	}
+	log.Info().Int("tokens", upserted).Int("pools", len(pools)).Msg("poolmeta: token metadata backfilled")
 }
 
 // outcomeLoop runs one outcomePass on a fixed interval until the context is cancelled,

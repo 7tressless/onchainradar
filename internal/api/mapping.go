@@ -12,6 +12,7 @@ import (
 	"ocr/internal/aggregate"
 	"ocr/internal/attest"
 	"ocr/internal/store"
+	"ocr/internal/tokens"
 )
 
 // This file is the only place store rows become public DTOs, so the shape is auditable
@@ -482,10 +483,10 @@ func dexAppURL(dex string) string {
 	}
 }
 
-// wmntAddress is WMNT's verified Mantle contract address (lowercase; matches the anchor
-// in internal/discover and config/pools.yaml). On Merchant Moe's v22 router WMNT renders
-// as the literal "MNT" (native MNT); see lpURL. Agni uses the address as-is.
-const wmntAddress = "0x78c1b0c915c4faa5fffa6cabf0219da63d7f4cb8"
+// wmntAddress is WMNT's verified Mantle contract address (internal/tokens, the single
+// source of truth). On Merchant Moe's v22 router WMNT renders as the literal "MNT"
+// (native MNT); see lpURL. Agni uses the address as-is.
+const wmntAddress = tokens.WMNT
 
 // lpURL builds a deep-link to a pool's add-liquidity page on its native DEX (a third
 // action link beside dexAppURL and matchaTradeURL). The patterns are verified, never
