@@ -17,7 +17,7 @@ Built for the Mantle Turing Test Hackathon, Track 02 (AI Alpha & Data).
 Track 02 asks for "smart-money tracking and on-chain anomaly bots." The usual answer is a Telegram bot wrapping an LLM, plus a throwaway contract deployed only to satisfy the rule. OCR makes the contract the point.
 
 - **A track record you audit, not trust.** Each call is `keccak256`-hashed and attested on Mantle the moment it fires; the score it carries is the same integer the dashboard shows. Matured calls are graded into a reproducible report card whose hash can be committed on-chain too, so the agent's hit-rate is independently verifiable, with no access to OCR's database.
-- **Detection that price cannot game.** Each pool is scored only against its own rolling baseline, in raw token units. No oracle and no USD normalization feed a single detection decision. Thin Mantle pools and new assets are first-class, and no one can manufacture a signal by moving a price. External market data is display-only, structurally walled off from the detector.
+- **Detection that price cannot game.** Each pool is scored only against its own rolling baseline, in raw token units. No oracle and no USD normalization feed a single detection decision. Thin Mantle pools and new assets are first-class, and no one can manufacture a signal by moving a price. The display-only market stats also come from the chain: reserves and spot price on-chain, 24h volume from OCR's own buckets. No external price feed enters the system, and the detector never reads them.
 - **The whole money map, not just stables.** Seven signal families span DEX swaps, whales, accumulating smart money, mETH / cmETH staking flows, Aave liquidations and borrows, and stablecoin depegs with a contagion map of exposed pools.
 
 ## What it detects
@@ -90,7 +90,7 @@ for f in migrations/*.sql; do psql "$DATABASE_URL" -f "$f"; done   # apply migra
 | `GET /api/signals` | paged signals with attestation tx and analyst note (`?graded=true` for matured calls) |
 | `GET /api/signals/{id}` | one signal, including the decoded triggering swap |
 | `GET /api/actors` / `/{addr}` | smart-money leaderboard and per-actor footprint |
-| `GET /api/pools` / `/{addr}` | pool registry, 24h on-chain activity, display-only market stats |
+| `GET /api/pools` / `/{addr}` | pool registry, 24h on-chain activity, display-only on-chain market stats |
 | `GET /api/series` | a pool metric as a time series |
 | `GET /api/live` | Server-Sent Events stream of new signals |
 
@@ -108,7 +108,7 @@ internal/
   deliver/      Telegram client + dispatcher + photo-card renderer
   outcome/      matured-signal grading + report-card hashing
   discover/     on-chain-verified pool discovery
-  poolstats/    display-only external market snapshot
+  poolstats/    display-only on-chain market snapshot
   api/          read-only JSON API + SSE
   config/       env + YAML loader
 contracts/      Foundry: SignalAttestor + OutcomeAttestor, tests, deploy scripts
